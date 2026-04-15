@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mv C:/Users/WN-ND000202/works/TechGloss/src/TechGloss.Infrastructure/Options/TechTransOptions.cs C:/Users/WN-ND000202/works/TechGloss/src/TechGloss.Infrastructure/Options/TechGlossOptions.cs)",
+      "Bash(mv C:/Users/WN-ND000202/works/TechGloss/src/TechGloss.GlossaryApi/TechTrans.GlossaryApi.http C:/Users/WN-ND000202/works/TechGloss/src/TechGloss.GlossaryApi/TechGloss.GlossaryApi.http)",
+      "Bash(mv C:/Users/WN-ND000202/works/TechGloss/.idea/.idea.TechTrans C:/Users/WN-ND000202/works/TechGloss/.idea/.idea.TechGloss)"
+    ]
+  }
+}

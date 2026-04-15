@@ -1,0 +1,116 @@
+# =============================================================================
+# .NET / C#
+# =============================================================================
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+*.pidb
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]uild/
+[Ll]og/
+[Ll]ogs/
+
+# NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# MSBuild / Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.vcxproj.filters
+*.sdf
+*.opensdf
+*.cachefile
+*.aps
+
+# Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+TestResults/
+
+# Publish output
+publish/
+**/publish/
+
+# =============================================================================
+# ASP.NET Core / WPF 런타임 설정
+# =============================================================================
+appsettings.Production.json
+appsettings.*.local.json
+*.pfx
+*.p12
+launchSettings.json
+
+# =============================================================================
+# SQLite DB 파일 (런타임 생성)
+# =============================================================================
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# =============================================================================
+# Node.js / SPA (web/)
+# =============================================================================
+node_modules/
+web/dist/
+web/dist-ssr/
+web/.vite/
+*.local
+
+# npm / yarn / pnpm 로그
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =============================================================================
+# SPA 빌드 출력 (WPF 복사 대상)
+# =============================================================================
+src/TechTrans.Wpf/Web/dist/
+
+# =============================================================================
+# IDE
+# =============================================================================
+.vs/
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Docker / Qdrant
+# =============================================================================
+qdrant_storage/
+docker-compose.override.yml
+
+# =============================================================================
+# 기타
+# =============================================================================
+*.bak
+*.tmp
+*.orig

@@ -1,0 +1,6 @@
+@TechGloss.GlossaryApi_HostAddress = http://localhost:5256
+
+GET {{TechGloss.GlossaryApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
