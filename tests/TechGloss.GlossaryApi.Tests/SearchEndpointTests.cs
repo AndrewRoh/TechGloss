@@ -1,14 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
-using Microsoft.AspNetCore.Mvc.Testing;
 using TechGloss.Core.Contracts;
 
 namespace TechGloss.GlossaryApi.Tests;
 
-public class SearchEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+public class SearchEndpointTests : IClassFixture<CustomWebApplicationFactory>
 {
     private readonly HttpClient _client;
-    public SearchEndpointTests(WebApplicationFactory<Program> f)
+    public SearchEndpointTests(CustomWebApplicationFactory f)
         => _client = f.CreateClient();
 
     [Fact]

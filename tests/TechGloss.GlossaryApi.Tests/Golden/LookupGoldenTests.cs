@@ -1,14 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
-using Microsoft.AspNetCore.Mvc.Testing;
 using TechGloss.Core.Contracts;
 
 namespace TechGloss.GlossaryApi.Tests.Golden;
 
-public class LookupGoldenTests : IClassFixture<WebApplicationFactory<Program>>
+public class LookupGoldenTests : IClassFixture<CustomWebApplicationFactory>
 {
     private readonly HttpClient _client;
-    public LookupGoldenTests(WebApplicationFactory<Program> f)
+    public LookupGoldenTests(CustomWebApplicationFactory f)
         => _client = f.CreateClient();
 
     [Theory]
