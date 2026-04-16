@@ -61,7 +61,6 @@ appsettings.Production.json
 appsettings.*.local.json
 *.pfx
 *.p12
-launchSettings.json
 
 # =============================================================================
 # SQLite DB 파일 (런타임 생성)

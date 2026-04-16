@@ -39,7 +39,7 @@ WPF Host (.NET 8)
 | 구분 | 값 |
 |------|-----|
 | Ollama LLM | `http://172.20.64.76:11434` |
-| LLM 모델 | `gemma4:31b` |
+| LLM 모델 | `gemma4:latest` |
 | 임베딩 모델 | `nomic-embed-text` (appsettings `EmbeddingModel` 키) |
 | GlossaryApi | `http://127.0.0.1:5088` |
 | Ollama 경로 | `/api/chat` (NDJSON, `UseOpenAiCompatiblePath: false`) |

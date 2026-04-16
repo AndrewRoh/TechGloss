@@ -1,9 +1,11 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using TechGloss.Core.Contracts;
 using TechGloss.Core.Models;
 using TechGloss.Wpf.Bridge;
@@ -20,6 +22,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private Brush _statusBrush = Brushes.Gray;
     private TranslationDirection _selectedDirection = TranslationDirection.EnToKo;
     private CancellationTokenSource? _cts;
+    private readonly Stopwatch _stopwatch = new();
+    private readonly DispatcherTimer _elapsedTimer;
 
     public event Action? TranslationStarted;
     public event Action<string>? ChunkReceived;
@@ -32,6 +36,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _orchestrator = orchestrator;
         TranslateCommand = new RelayCommand(async _ => await ExecuteTranslateAsync(), _ => !IsTranslating);
         CopyResultCommand = new RelayCommand(_ => CopyRequested?.Invoke());
+
+        _elapsedTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _elapsedTimer.Tick += (_, _) =>
+            SetStatus($"번역 중... {_stopwatch.Elapsed.TotalSeconds:F0}초", isError: false);
     }
 
     public ICommand TranslateCommand { get; }
@@ -87,7 +95,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _cts = new CancellationTokenSource();
         IsTranslating = true;
         CommandManager.InvalidateRequerySuggested();
-        SetStatus("번역 중...", isError: false);
+
+        _stopwatch.Restart();
+        _elapsedTimer.Start();
+        SetStatus("번역 중... 0초", isError: false);
         TranslationStarted?.Invoke();
 
         var (sourceLang, targetLang) = SelectedDirection.ToLangPair();
@@ -97,18 +108,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 SourceText, sourceLang, targetLang, categorySlug: null,
                 new Progress<string>(chunk => ChunkReceived?.Invoke(chunk)),
                 _cts.Token);
-            SetStatus("번역 완료", isError: false);
+            var elapsed = _stopwatch.Elapsed;
+            SetStatus($"번역 완료 ({elapsed.TotalSeconds:F1}초)", isError: false);
         }
         catch (OperationCanceledException)
         {
-            SetStatus("번역 취소됨", isError: false);
+            var elapsed = _stopwatch.Elapsed;
+            SetStatus($"번역 취소됨 ({elapsed.TotalSeconds:F1}초)", isError: false);
         }
         catch (Exception ex)
         {
-            SetStatus($"오류: {ex.Message}", isError: true);
+            var elapsed = _stopwatch.Elapsed;
+            SetStatus($"오류: {ex.Message} ({elapsed.TotalSeconds:F1}초)", isError: true);
         }
         finally
         {
+            _elapsedTimer.Stop();
+            _stopwatch.Stop();
             IsTranslating = false;
             CommandManager.InvalidateRequerySuggested();
         }
