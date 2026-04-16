@@ -9,7 +9,7 @@ export function TranslatePane() {
   const resultRef = useRef('');
 
   useEffect(() => {
-    onHostMessage((msg) => {
+    const cleanup = onHostMessage((msg) => {
       if (msg.type === 'translation.chunk') {
         resultRef.current += (msg.payload as string);
         setResult(resultRef.current);
@@ -22,6 +22,7 @@ export function TranslatePane() {
         setResult(`오류: ${msg.payload}`);
       }
     });
+    return cleanup;  // StrictMode 이중 등록 방지
   }, []);
 
   const handleTranslate = () => {

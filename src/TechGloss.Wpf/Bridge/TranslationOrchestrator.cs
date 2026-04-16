@@ -34,14 +34,25 @@ public sealed class TranslationOrchestrator
             "Translation requestId={RequestId} textHash={Hash} src={Src} tgt={Tgt}",
             requestId, MaskingLogger.HashText(text), sourceLang, targetLang);
 
-        var glossaryRows = await _glossary.SearchAsync(new GlossarySearchRequest
+        IReadOnlyList<GlossarySearchRow> glossaryRows;
+        try
         {
-            QueryText    = text,
-            SourceLang   = sourceLang,
-            TargetLang   = targetLang,
-            TopK         = 8,
-            CategorySlug = categorySlug
-        }, ct);
+            glossaryRows = await _glossary.SearchAsync(new GlossarySearchRequest
+            {
+                QueryText    = text,
+                SourceLang   = sourceLang,
+                TargetLang   = targetLang,
+                TopK         = 8,
+                CategorySlug = categorySlug
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "GlossaryApi unavailable — proceeding without glossary context (requestId={RequestId})",
+                requestId);
+            glossaryRows = [];   // 용어집 없이 번역 진행
+        }
 
         var systemPrompt = PromptBuilder.BuildSystemPrompt(sourceLang, targetLang, glossaryRows);
 

@@ -33,12 +33,20 @@ public partial class MainWindow : Window
             distPath,
             CoreWebView2HostResourceAccessKind.Allow);
 
-        core.WebMessageReceived += (_, args) =>
+        core.WebMessageReceived += async (_, args) =>
         {
             var json = args.WebMessageAsJson;
-            _ = Dispatcher.InvokeAsync(() =>
-                _bridge.HandleWebMessageAsync(json, replyJson =>
-                    core.PostWebMessageAsJson(replyJson)));
+            try
+            {
+                await _bridge.HandleWebMessageAsync(json, replyJson =>
+                    core.PostWebMessageAsJson(replyJson));
+            }
+            catch (Exception ex)
+            {
+                core.PostWebMessageAsJson(
+                    System.Text.Json.JsonSerializer.Serialize(
+                        new { type = "translation.error", payload = ex.Message }));
+            }
         };
 
 #if DEBUG

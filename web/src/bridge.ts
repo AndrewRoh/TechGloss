@@ -26,10 +26,13 @@ export function sendToHost<T>(type: MessageType, payload: T) {
   window.chrome?.webview?.postMessage(JSON.stringify({ type, payload }));
 }
 
-export function onHostMessage(handler: (msg: { type: string; payload: unknown }) => void) {
-  window.chrome?.webview?.addEventListener('message', (e: MessageEvent) => {
+export function onHostMessage(handler: (msg: { type: string; payload: unknown }) => void): () => void {
+  const listener = (e: MessageEvent) => {
     try { handler(JSON.parse(e.data)); } catch { /* ignore */ }
-  });
+  };
+  window.chrome?.webview?.addEventListener('message', listener);
+  // cleanup 함수 반환 — useEffect의 return에서 호출
+  return () => window.chrome?.webview?.removeEventListener?.('message', listener);
 }
 
 declare global {
@@ -38,6 +41,7 @@ declare global {
       webview?: {
         postMessage(msg: string): void;
         addEventListener(type: 'message', handler: (e: MessageEvent) => void): void;
+        removeEventListener?(type: 'message', handler: (e: MessageEvent) => void): void;
       };
     };
   }
