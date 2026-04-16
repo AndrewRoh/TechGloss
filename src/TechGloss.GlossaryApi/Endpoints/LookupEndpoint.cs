@@ -26,23 +26,18 @@ public static class LookupEndpoint
             var escaped = q.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
             var pattern = $"%{escaped}%";
 
-            var query = db.Entries.AsNoTracking()
-                .Where(e => e.Status == "published");
+            var query = db.Entries.AsNoTracking();
 
             if (category_id.HasValue)
                 query = query.Where(e => e.CategoryId == category_id);
 
             query = langMode switch
             {
-                "ko" => query.Where(e =>
+                "ko" => query.Where(e => EF.Functions.Like(e.TermKo, pattern, "\\")),
+                "en" => query.Where(e => EF.Functions.Like(e.TermEn, pattern, "\\")),
+                _    => query.Where(e =>
                     EF.Functions.Like(e.TermKo, pattern, "\\") ||
-                    EF.Functions.Like(e.DefinitionKo, pattern, "\\")),
-                "en" => query.Where(e =>
-                    EF.Functions.Like(e.TermEn, pattern, "\\")),
-                _ => query.Where(e =>
-                    EF.Functions.Like(e.TermKo, pattern, "\\") ||
-                    EF.Functions.Like(e.TermEn, pattern, "\\") ||
-                    EF.Functions.Like(e.DefinitionKo, pattern, "\\"))
+                    EF.Functions.Like(e.TermEn, pattern, "\\"))
             };
 
             var entries = await query

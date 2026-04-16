@@ -5,69 +5,143 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="4"/>
+            <RowDefinition Height="220"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <Grid Grid.Row="0" Margin="8">
+        <!-- 번역 영역 (원문 | 결과) -->
+        <Grid Grid.Row="0" Margin="8,8,8,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="4"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="4"/>
-                <ColumnDefinition Width="260"/>
             </Grid.ColumnDefinitions>
 
             <!-- 원문 입력 -->
-            <DockPanel Grid.Column="0">
-                <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="0,0,0,4">
-                    <TextBlock Text="원문" FontWeight="Bold" VerticalAlignment="Center"/>
-                    <ComboBox DockPanel.Dock="Right" Width="110"
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- 원문 헤더 -->
+                <Grid Grid.Row="0" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="원문" FontWeight="Bold"
+                               VerticalAlignment="Center"/>
+                    <ComboBox Grid.Column="2" Width="110" Margin="0,0,6,0"
+                              VerticalAlignment="Center"
                               ItemsSource="{Binding Directions}"
                               SelectedItem="{Binding SelectedDirection}"/>
-                </DockPanel>
-                <Button DockPanel.Dock="Bottom" Content="번역 (Ctrl+Enter)" Height="30"
-                        Margin="0,4,0,0" Command="{Binding TranslateCommand}"/>
-                <TextBox Text="{Binding SourceText, UpdateSourceTrigger=PropertyChanged}"
+                    <Button Grid.Column="3" Content="번역 (Ctrl+Enter)" Width="120" Height="26"
+                            Command="{Binding TranslateCommand}"/>
+                </Grid>
+
+                <!-- 원문 텍스트 -->
+                <TextBox Grid.Row="1"
+                         Text="{Binding SourceText, UpdateSourceTrigger=PropertyChanged}"
                          AcceptsReturn="True" TextWrapping="Wrap"
                          VerticalScrollBarVisibility="Auto"
                          FontSize="13"/>
-            </DockPanel>
+            </Grid>
 
             <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch" Background="LightGray"/>
 
             <!-- 번역 결과 -->
-            <DockPanel Grid.Column="2">
-                <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="0,0,0,4">
-                    <TextBlock Text="번역 결과" FontWeight="Bold" VerticalAlignment="Center"/>
-                    <Button DockPanel.Dock="Right" Content="복사" Width="50"
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- 결과 헤더 -->
+                <Grid Grid.Row="0" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="번역 결과" FontWeight="Bold"
+                               VerticalAlignment="Center"/>
+                    <Button Grid.Column="2" Content="복사" Width="50" Height="26"
                             Command="{Binding CopyResultCommand}"/>
-                </DockPanel>
-                <RichTextBox x:Name="resultRichTextBox"
+                </Grid>
+
+                <!-- 번역 결과 텍스트 -->
+                <RichTextBox Grid.Row="1" x:Name="resultRichTextBox"
                              IsReadOnly="True"
                              VerticalScrollBarVisibility="Auto"
                              FontSize="13"/>
-            </DockPanel>
-
-            <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch" Background="LightGray"/>
-
-            <!-- 용어 조회 -->
-            <DockPanel Grid.Column="4">
-                <TextBlock DockPanel.Dock="Top" Text="용어 조회" FontWeight="Bold" Margin="0,0,0,4"/>
-                <TextBox DockPanel.Dock="Top" Margin="0,0,0,4"
-                         Text="{Binding LookupQuery, UpdateSourceTrigger=PropertyChanged}"/>
-                <DataGrid ItemsSource="{Binding LookupResults}"
-                          AutoGenerateColumns="False" IsReadOnly="True"
-                          CanUserAddRows="False" CanUserDeleteRows="False"
-                          SelectionMode="Single" FontSize="11">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="EN" Binding="{Binding TermEn}" Width="*"/>
-                        <DataGridTextColumn Header="KO" Binding="{Binding TermKo}" Width="*"/>
-                    </DataGrid.Columns>
-                </DataGrid>
-            </DockPanel>
+            </Grid>
         </Grid>
 
-        <StatusBar Grid.Row="1">
+        <!-- 수평 GridSplitter -->
+        <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch" Background="LightGray"/>
+
+        <!-- 용어 조회 (하단) -->
+        <Grid Grid.Row="2" Margin="8,4,8,4">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- 용어 조회 헤더 -->
+            <Grid Grid.Row="0" Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="용어 조회" FontWeight="Bold"
+                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="1"
+                         Text="{Binding LookupQuery, UpdateSourceTrigger=PropertyChanged}"
+                         VerticalAlignment="Center"/>
+            </Grid>
+
+            <!-- 용어 조회 결과 -->
+            <DataGrid Grid.Row="1"
+                      ItemsSource="{Binding LookupResults}"
+                      AutoGenerateColumns="False" IsReadOnly="True"
+                      CanUserAddRows="False" CanUserDeleteRows="False"
+                      SelectionMode="Single" FontSize="12"
+                      VerticalScrollBarVisibility="Auto">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="영문 (EN)" Binding="{Binding TermEn}" Width="180">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextWrapping" Value="Wrap"/>
+                                <Setter Property="Padding" Value="2"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="한글 (KO)" Binding="{Binding TermKo}" Width="150">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextWrapping" Value="Wrap"/>
+                                <Setter Property="Padding" Value="2"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="정의" Binding="{Binding DefinitionKo}" Width="*">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextWrapping" Value="Wrap"/>
+                                <Setter Property="Padding" Value="2"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Grid>
+
+        <!-- 상태 표시줄 -->
+        <StatusBar Grid.Row="3">
             <StatusBarItem>
                 <TextBlock Text="{Binding StatusMessage}" Foreground="{Binding StatusBrush}"/>
             </StatusBarItem>

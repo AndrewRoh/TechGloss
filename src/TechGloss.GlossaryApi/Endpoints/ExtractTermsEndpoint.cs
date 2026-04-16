@@ -32,7 +32,11 @@ public static class ExtractTermsEndpoint
             if (rawTerms.Count == 0)
                 return Results.Ok(Array.Empty<ExtractedTermRow>());
 
-            // 2. 각 용어 쌍 upsert
+            // 2. 카테고리 캐시 구성 (기존 조회 + 신규 생성 추적)
+            var categoryCache = (await db.Categories.ToListAsync(ct))
+                .ToDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
+
+            // 3. 각 용어 쌍 upsert
             var results = new List<ExtractedTermRow>(rawTerms.Count);
             foreach (var raw in rawTerms)
             {
@@ -41,9 +45,13 @@ public static class ExtractTermsEndpoint
                     .Normalize(System.Text.NormalizationForm.FormKC)
                     .ToLowerInvariant();
 
-                // 카테고리 조회 (없으면 null)
-                var category = await db.Categories
-                    .FirstOrDefaultAsync(c => c.Name == raw.CategoryName, ct);
+                // 카테고리 조회 — 없으면 신규 생성
+                if (!categoryCache.TryGetValue(raw.CategoryName, out var category))
+                {
+                    category = new GlossaryCategory { Id = Guid.NewGuid(), Name = raw.CategoryName };
+                    db.Categories.Add(category);
+                    categoryCache[raw.CategoryName] = category;
+                }
 
                 // 동일 영문 정규형 중복 확인
                 var found = await db.Entries
@@ -60,7 +68,8 @@ public static class ExtractTermsEndpoint
                         TermKo            = raw.TermKo,
                         TermEnNormalized  = enNorm,
                         TermKoNormalized  = koNorm,
-                        CategoryId        = category?.Id,
+                        DefinitionKo      = raw.DefinitionKo,
+                        CategoryId        = category.Id,
                         Status            = "draft",
                         CreatedAt         = DateTimeOffset.UtcNow,
                         UpdatedAt         = DateTimeOffset.UtcNow,
@@ -70,13 +79,26 @@ public static class ExtractTermsEndpoint
                 else
                 {
                     entry = found;
+                    var updated = false;
+
                     if (string.IsNullOrWhiteSpace(found.TermKo))
                     {
-                        // 한글 용어가 비어 있을 때만 보완
                         found.TermKo           = raw.TermKo;
                         found.TermKoNormalized = koNorm;
-                        found.UpdatedAt        = DateTimeOffset.UtcNow;
+                        updated = true;
                     }
+                    if (string.IsNullOrWhiteSpace(found.DefinitionKo) &&
+                        !string.IsNullOrWhiteSpace(raw.DefinitionKo))
+                    {
+                        found.DefinitionKo = raw.DefinitionKo;
+                        updated = true;
+                    }
+                    if (found.CategoryId is null)
+                    {
+                        found.CategoryId = category.Id;
+                        updated = true;
+                    }
+                    if (updated) found.UpdatedAt = DateTimeOffset.UtcNow;
                 }
 
                 results.Add(new ExtractedTermRow
@@ -84,7 +106,7 @@ public static class ExtractTermsEndpoint
                     EntryId      = entry.Id,
                     TermEn       = entry.TermEn,
                     TermKo       = entry.TermKo,
-                    CategoryName = category?.Name ?? raw.CategoryName,
+                    CategoryName = category.Name,
                     IsNew        = isNew,
                 });
             }
