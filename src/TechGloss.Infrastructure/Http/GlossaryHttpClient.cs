@@ -52,4 +52,14 @@ public sealed class GlossaryHttpClient : IGlossaryClient
             $"{_opts.BaseUrl}/glossary/publish", new { entry_id = entryId }, ct);
         result.EnsureSuccessStatusCode();
     }
+
+    public async Task<IReadOnlyList<ExtractedTermRow>> ExtractTermsAsync(
+        ExtractTermsRequest request, CancellationToken ct = default)
+    {
+        var result = await _http.PostAsJsonAsync(
+            $"{_opts.BaseUrl}/glossary/extract-terms", request, ct);
+        result.EnsureSuccessStatusCode();
+        return await result.Content.ReadFromJsonAsync<List<ExtractedTermRow>>(ct)
+               ?? new List<ExtractedTermRow>();
+    }
 }

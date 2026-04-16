@@ -20,7 +20,6 @@ public sealed class GlossaryEntry
 public sealed class GlossaryCategory
 {
     public Guid Id { get; set; }
-    public string Slug { get; set; } = "";
+    /// <summary>영문 카테고리명 — UNIQUE 제약. 예: "General", "Cloud", "DevOps"</summary>
     public string Name { get; set; } = "";
-    public Guid? ParentId { get; set; }
 }

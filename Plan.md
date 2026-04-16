@@ -217,9 +217,7 @@ public sealed class GlossaryEntry
 public sealed class GlossaryCategory
 {
     public Guid Id { get; set; }
-    public string Slug { get; set; } = "";   // URL/필터용 식별자 (예: "cloud", "frontend", "dotnet")
-    public string Name { get; set; } = "";   // 한글 표시명 권장 (Research §5.6.3) — lookup 결과에 노출
-    public Guid? ParentId { get; set; }      // 계층 구조 지원; null = 최상위 카테고리
+    public string Name { get; set; } = "";   // 영문 카테고리명 UNIQUE — 예: "General", "Cloud", "DevOps"
 }
 ```
 
@@ -243,7 +241,7 @@ public sealed class GlossarySearchRequest
     public int TopK { get; init; } = 8;
 
     // 동일 영문 용어가 카테고리마다 다른 국문 대역을 가질 때 필터링 (Research §4.4 용어 충돌 절)
-    public string? CategorySlug { get; init; }
+    public string? CategoryName { get; init; }
 }
 
 // GlossaryApi가 WPF 호스트에 반환하는 RAG 검색 결과 행
@@ -253,7 +251,7 @@ public sealed class GlossarySearchRow
     public string TermEn { get; init; } = "";
     public string TermKo { get; init; } = "";
     public string DefinitionKo { get; init; } = "";    // 프롬프트 글로서리 표에 삽입됨
-    public string CategorySlug { get; init; } = "";    // 벡터 payload filter와 동일 값
+    public string CategoryName { get; init; } = "";    // 영문 카테고리명 (예: "Cloud", "DevOps")
 
     // GlossaryApi가 방향에 맞게 이미 정규화해서 내려줌
     // EN→KO면 Source="deploy", Target="배포"; KO→EN이면 반전
@@ -847,10 +845,8 @@ Expected: FAIL — 프로그램 없음
 ```sql
 -- Research §5.6.3 — 작성자/승인자 컬럼 없음
 CREATE TABLE IF NOT EXISTS glossary_category (
-    id          TEXT PRIMARY KEY,   -- UUID 문자열
-    slug        TEXT NOT NULL UNIQUE,
-    name        TEXT NOT NULL,
-    parent_id   TEXT REFERENCES glossary_category(id)
+    id   TEXT PRIMARY KEY,          -- UUID 문자열
+    name TEXT NOT NULL UNIQUE       -- 영문 카테고리명 (예: General, Cloud, DevOps)
 );
 
 CREATE TABLE IF NOT EXISTS glossary_entry (
@@ -1510,7 +1506,7 @@ export interface TranslatePayload {
   text: string;
   source_lang: 'en' | 'ko';  // 명시 필수 (Research §4.3) — UI 토글 값을 직접 매핑
   target_lang: 'en' | 'ko';
-  category_slug?: string;     // 용어 충돌 완화용; 없으면 전 카테고리 검색
+  category_name?: string;     // 영문 카테고리명; 없으면 전 카테고리 검색
 }
 
 // GlossaryHttpClient.GlossaryLookupRow의 camelCase 대응 — JSON 직렬화 키 매핑 주의
@@ -1699,7 +1695,7 @@ export function TranslatePane() {
       text: sourceText,
       source_lang: direction === 'en-ko' ? 'en' : 'ko',
       target_lang: direction === 'en-ko' ? 'ko' : 'en',
-      // category_slug 미전송 → 서버가 전 카테고리 검색 (충돌 완화 불필요 시 기본값)
+      // category_name 미전송 → 서버가 전 카테고리 검색 (충돌 완화 불필요 시 기본값)
     });
   };
 
@@ -1920,7 +1916,7 @@ public static class PromptBuilder
             sb.AppendLine("|--------|--------|-----------|---------|");
             foreach (var r in rows)
                 // DefinitionKo: LLM이 문맥 이해에 활용 — 단순 Source→Target 치환보다 정확도 향상
-                sb.AppendLine($"| {r.Source} | {r.Target} | {r.DefinitionKo} | {r.CategorySlug} |");
+                sb.AppendLine($"| {r.Source} | {r.Target} | {r.DefinitionKo} | {r.CategoryName} |");
         }
         // 글로서리 없을 때: 블록 1만 반환 — 프롬프트 유효성 유지
 
@@ -1968,8 +1964,8 @@ public sealed class TranslationOrchestrator
         var sourceLang = payload.GetProperty("source_lang").GetString() ?? "en";
         var targetLang = payload.GetProperty("target_lang").GetString() ?? "ko";
         // TryGetProperty: 선택 필드 — 없어도 에러 없이 null 처리
-        var categorySlug = payload.TryGetProperty("category_slug", out var cs)
-            ? cs.GetString() : null;
+        var categoryName = payload.TryGetProperty("category_name", out var cn)
+            ? cn.GetString() : null;
 
         // Research §5.2 step 1~2: 글로서리 RAG 검색
         // MVP 단계: SQL LIKE 검색 / Phase D: 임베딩 벡터 검색으로 교체 (인터페이스 동일)
@@ -1980,7 +1976,7 @@ public sealed class TranslationOrchestrator
             SourceLang   = sourceLang,
             TargetLang   = targetLang,
             TopK         = 8,            // 프롬프트 컨텍스트 8행 — 너무 많으면 컨텍스트 낭비
-            CategorySlug = categorySlug  // null이면 전 카테고리
+            CategoryName = categoryName  // null이면 전 카테고리
         }, ct);
 
         // Research §4.4 블록 1+2: 시스템 프롬프트 조립
@@ -2101,8 +2097,8 @@ public sealed class EmbeddingService
     // 단순 term만 임베딩하면 문맥 부족 → 풍부한 텍스트로 검색 품질 향상
     // static: 외부에서 임베딩 텍스트 생성 표준화 — 항목 저장 시와 검색 시 동일 포맷 보장
     public static string BuildEmbedText(
-        string categorySlug, string termEn, string termKo, string definitionKo)
-        => $"{categorySlug}: {termEn} => {termKo}. {definitionKo}";
+        string categoryName, string termEn, string termKo, string definitionKo)
+        => $"{categoryName}: {termEn} => {termKo}. {definitionKo}";
 
     // 반환값 float[]: 벡터 차원 = 임베딩 모델 출력 차원 (모델마다 다름; nomic-embed-text = 768)
     // 차원이 바뀌면 전체 재임베딩 필요 (Research §5.4)
@@ -2172,8 +2168,8 @@ public static class SearchEndpoint
                 TermEn       = e.TermEn,
                 TermKo       = e.TermKo,
                 DefinitionKo = e.DefinitionKo,
-                // MVP: CategoryId를 문자열로 변환 (Phase D에서 Category 조인으로 slug 반환)
-                CategorySlug = e.CategoryId?.ToString() ?? "",
+                // CategoryId → Category 조인으로 Name 반환
+                CategoryName = /* categories dict lookup */ "",
                 Source       = req.SourceLang == "en" ? e.TermEn : e.TermKo,
                 Target       = req.TargetLang == "ko" ? e.TermKo : e.TermEn
             });

@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Extensions.Logging;
 using TechGloss.Core.Contracts;
 using TechGloss.Core.Services;
@@ -20,7 +21,7 @@ public sealed class TranslationOrchestrator
     }
 
     public async Task RunStreamingAsync(
-        string text, string sourceLang, string targetLang, string? categorySlug,
+        string text, string sourceLang, string targetLang, string? categoryName,
         IProgress<string> onChunk, CancellationToken ct = default)
     {
         var requestId = Guid.NewGuid().ToString("N")[..8];
@@ -37,7 +38,7 @@ public sealed class TranslationOrchestrator
                 SourceLang   = sourceLang,
                 TargetLang   = targetLang,
                 TopK         = 8,
-                CategorySlug = categorySlug
+                CategoryName = categoryName
             }, ct);
         }
         catch (Exception ex)
@@ -49,9 +50,44 @@ public sealed class TranslationOrchestrator
 
         var systemPrompt = PromptBuilder.BuildSystemPrompt(sourceLang, targetLang, glossaryRows);
 
+        // 스트리밍하면서 번역 결과 전체를 수집 (용어 자동 추출용)
+        var translatedSb = new StringBuilder();
         await foreach (var chunk in _llm.StreamChatAsync(systemPrompt, text, ct))
         {
             onChunk.Report(chunk);
+            translatedSb.Append(chunk);
+        }
+
+        // 번역 완료 후 용어 자동 추출 (CancellationToken.None — UI 취소와 무관하게 실행)
+        await ExtractTermsAfterTranslationAsync(
+            text, translatedSb.ToString(), sourceLang, targetLang, requestId);
+    }
+
+    private async Task ExtractTermsAfterTranslationAsync(
+        string sourceText, string translatedText,
+        string sourceLang, string targetLang, string requestId)
+    {
+        if (string.IsNullOrWhiteSpace(translatedText)) return;
+        try
+        {
+            var extracted = await _glossary.ExtractTermsAsync(new ExtractTermsRequest
+            {
+                SourceText     = sourceText,
+                TranslatedText = translatedText,
+                SourceLang     = sourceLang,
+                TargetLang     = targetLang,
+            }, CancellationToken.None);
+
+            var newCount   = extracted.Count(r => r.IsNew);
+            var totalCount = extracted.Count;
+            _logger.LogInformation(
+                "용어 자동 추출 완료 requestId={RequestId}: 총 {Total}건 (신규 {New}건)",
+                requestId, totalCount, newCount);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "용어 자동 추출 실패 requestId={RequestId} — 무시하고 계속", requestId);
         }
     }
 }

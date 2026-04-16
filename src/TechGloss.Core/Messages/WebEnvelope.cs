@@ -8,4 +8,4 @@ public sealed record TranslationRequest(
     string SourceText,
     string SourceLang,
     string TargetLang,
-    string? CategorySlug = null);
+    string? CategoryName = null);

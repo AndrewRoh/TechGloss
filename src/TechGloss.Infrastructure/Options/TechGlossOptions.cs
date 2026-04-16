@@ -9,7 +9,7 @@ public sealed class TechGlossOptions
 public sealed class OllamaOptions
 {
     public string BaseUrl { get; set; } = "http://172.20.64.76:11434";
-    public string Model { get; set; } = "gemma4:31b";
+    public string Model { get; set; } = "gemma4:latest";
     public string EmbeddingModel { get; set; } = "nomic-embed-text";
     public string ChatPath { get; set; } = "/api/chat";
     public bool UseOpenAiCompatiblePath { get; set; } = false;

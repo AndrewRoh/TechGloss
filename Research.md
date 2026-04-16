@@ -163,7 +163,7 @@ API 레퍼런스: [AddHostObjectToScript](https://learn.microsoft.com/dotnet/api
 2. **용어 테이블(글로서리):** **Glossary API** 유사도 검색으로 가져온 상위 k개 **`term_en`, `term_ko`, `definition_ko`(국문), `category`** 를 **현재 방향**에 맞게 `(source, target)` 열로 바꿔 표 형태로 삽입.
 3. **사용자:** 원문, 이전 문맥(선택), **`source_lang` / `target_lang`**, 톤.
 
-**용어 충돌:** 동일 영문이 **카테고리**에 따라 국문 대역이 달라질 수 있으므로, 페이로드에 **`category_slug`(또는 `category_id`)** 를 넣고 **Glossary API**에서 필터링(벡터 DB `payload filter`는 서버 내부 구현)한다.
+**용어 충돌:** 동일 영문이 **카테고리**에 따라 국문 대역이 달라질 수 있으므로, 페이로드에 **`category_name`(또는 `category_id`)** 를 넣고 **Glossary API**에서 필터링(벡터 DB `payload filter`는 서버 내부 구현)한다.
 
 ### 4.5 본 프로젝트에서의 LLM 선택
 
@@ -277,9 +277,7 @@ SQLite·PostgreSQL 등 공통으로 옮기기 쉬운 **논리명** 기준이다.
 | 컬럼 | 타입(예) | 설명 |
 |------|-----------|------|
 | `id` | UUID / BIGSERIAL | PK |
-| `slug` | VARCHAR(64) UNIQUE | `cloud`, `frontend`, `dotnet` 등 URL·필터용 |
-| `name` | VARCHAR(255) | 표시명(관리 UI, **한글 표기 권장**) |
-| `parent_id` | UUID NULL FK | 상위 카테고리(계층), 없으면 NULL |
+| `name` | VARCHAR(255) UNIQUE | **영문 카테고리명** — 예: `General`, `Cloud`, `DevOps`, `Frontend`, `Backend`, `Dotnet`, `Database`, `Security`, `Network`, `AI`, `Mobile`, `Testing` |
 
 **`glossary_entry`** (용어 사전 핵심 — **국문 용어·영문 용어·국문 정의·카테고리**)
 
@@ -345,9 +343,9 @@ SQLite·PostgreSQL 등 공통으로 옮기기 쉬운 **논리명** 기준이다.
 
 포인트 페이로드에 검색 필터에 쓰는 필드를 **SQL과 동일 값**으로 복제한다.
 
-- `entry_id`, `term_ko`, `term_en`, `status`, `category_slug`, (선택) `definition_ko` 앞부분만 잘라 넣기.
+- `entry_id`, `term_ko`, `term_en`, `status`, `category_name`, (선택) `definition_ko` 앞부분만 잘라 넣기.
 
-필터 예: `status == published` AND `category_slug == dotnet`.
+필터 예: `status == published` AND `category_name == Dotnet`.
 
 #### 5.6.6 Glossary API와의 대응
 

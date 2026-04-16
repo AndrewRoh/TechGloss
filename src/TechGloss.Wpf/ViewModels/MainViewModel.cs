@@ -105,7 +105,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         try
         {
             await _orchestrator.RunStreamingAsync(
-                SourceText, sourceLang, targetLang, categorySlug: null,
+                SourceText, sourceLang, targetLang, categoryName: null,
                 new Progress<string>(chunk => ChunkReceived?.Invoke(chunk)),
                 _cts.Token);
             var elapsed = _stopwatch.Elapsed;

@@ -65,16 +65,18 @@ docs/DEPLOY.md
 ### 도메인 (TechGloss.Core)
 
 - `GlossaryEntry` — SQLite 테이블 매핑. `Id`(Guid) = Qdrant point id
-- `GlossaryCategory` — 계층 카테고리, `Slug`(URL용) / `Name`(한글 표시)
+- `GlossaryCategory` — `Id`(Guid) + `Name`(영문, UNIQUE) — 예: `"General"`, `"Cloud"`, `"DevOps"`
 - `TranslationDirection` — `EnToKo` / `KoToEn` 열거형. `.ToLangPair()` 확장
 - `TranslationRequest` — ViewModel → Orchestrator 요청 모델. `SourceText`, `Direction` 포함
 - `GlossarySearchRequest` — RAG 검색 요청 (TopK 기본 8, CategorySlug 선택)
 - `GlossarySearchRow` — RAG 결과. `Source`/`Target`은 방향에 맞게 이미 정규화
 - `GlossaryLookupRow` — LIKE 검색 결과 (UI 평탄 구조)
+- `ExtractTermsRequest` — 번역 원문·번역 결과 + 방향 → 용어 자동 추출 요청
+- `ExtractedTermRow` — 추출 결과. `EntryId`, `TermEn`, `TermKo`, `CategorySlug`, `IsNew`
 
 ### 인터페이스 (TechGloss.Core.Contracts)
 
-- `IGlossaryClient` — `SearchAsync`, `LookupAsync`, `UpsertAsync`, `PublishAsync`
+- `IGlossaryClient` — `SearchAsync`, `LookupAsync`, `UpsertAsync`, `PublishAsync`, `ExtractTermsAsync`
 - `IOllamaChatClient` — `StreamChatAsync` → `IAsyncEnumerable<string>` (토큰 델타)
 
 ### 설정 (TechGloss.Infrastructure.Options)
@@ -101,6 +103,40 @@ docs/DEPLOY.md
 
 - **SSRF 방지:** `AllowedHostsHandler` — 허용 호스트 외 요청 즉시 `InvalidOperationException`
 - 허용 목록: `172.20.64.76`, `127.0.0.1` (기본값)
+
+## GlossaryApi 엔드포인트
+
+| 엔드포인트 | 용도 |
+|------------|------|
+| `POST /glossary/search` | RAG — 임베딩 + 벡터 유사도 검색 |
+| `GET /glossary/lookup?q=...&lang=auto` | 글자 단위 LIKE 검색 (SQL, 실시간) |
+| `POST /glossary/upsert` | 용어 단건 추가/수정 |
+| `POST /glossary/publish` | 상태를 `published`로 전환 |
+| `POST /glossary/extract-terms` | **번역 자동 용어 추출** — 번역 원문+결과를 Ollama로 분석해 용어 쌍(EN/KO/카테고리) DB upsert |
+
+### 용어 자동 추출 흐름 (`POST /glossary/extract-terms`)
+
+```
+TranslationOrchestrator (WPF)
+  → 스트리밍 번역 완료 후
+  → IGlossaryClient.ExtractTermsAsync(ExtractTermsRequest)
+      → POST /glossary/extract-terms
+          → TermExtractionService.ExtractAsync()
+              → Ollama /api/chat (stream: false)
+                 프롬프트: "아래 영문/한글 텍스트에서 IT 용어 쌍을 JSON 배열로 추출"
+              → 응답 JSON 파싱 → List<RawTerm>
+          → 각 RawTerm: TermEnNormalized 기준 중복 확인
+              → 신규: GlossaryEntry INSERT (status=draft)
+              → 기존(TermKo 비어있을 때): TermKo 보완
+          → DB SaveChanges
+          → ExtractedTermRow[] 반환
+```
+
+**규칙:**
+- 추출 실패(Ollama 미응답·파싱 오류)는 경고 로그만 남기고 번역 결과에 영향 없음
+- 추출된 항목은 `status=draft` — 사용자가 확인 후 `/glossary/publish`로 활성화
+- `category_name` 허용 목록: `General`, `Cloud`, `Frontend`, `Backend`, `Dotnet`, `Database`, `DevOps`, `Security`, `Network`, `AI`, `Mobile`, `Testing`
+- 허용 목록과 대소문자 무관 매칭 — 불일치 시 `General` 대체
 
 ## 검색 두 경로
 
@@ -141,6 +177,7 @@ docs/DEPLOY.md
 - `appsettings.Production.json` 환경 오버레이만 허용 — LLM URL·모델 코드 하드코딩 금지
 - `TermKoNormalized` / `TermEnNormalized` 컬럼은 앱 레이어에서 NFKC + Trim + ToLower 적용 후 저장
 - `GlossaryEntry.Id`(Guid)는 Qdrant point id와 동일 값 유지 — SQL ↔ 벡터 동기화 단순화
+- `GlossaryCategory.Name`은 **영문** UNIQUE — `slug`, `parent_id` 컬럼 없음. 필터 키로 `Name` 직접 사용
 
 ## 테스트
 

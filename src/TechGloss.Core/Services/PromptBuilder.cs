@@ -47,7 +47,7 @@ public static class PromptBuilder
             sb.AppendLine("| Source | Target | 정의(국문) | 카테고리 |");
             sb.AppendLine("|--------|--------|-----------|---------|");
             foreach (var r in rows)
-                sb.AppendLine($"| {r.Source} | {r.Target} | {r.DefinitionKo} | {r.CategorySlug} |");
+                sb.AppendLine($"| {r.Source} | {r.Target} | {r.DefinitionKo} | {r.CategoryName} |");
         }
 
         return sb.ToString();

@@ -26,6 +26,7 @@ public sealed class GlossaryDbContext : DbContext
             c.ToTable("glossary_category");
             c.HasKey(x => x.Id);
             c.Property(x => x.Id).HasConversion<string>();
+            c.HasIndex(x => x.Name).IsUnique();
         });
     }
 }
