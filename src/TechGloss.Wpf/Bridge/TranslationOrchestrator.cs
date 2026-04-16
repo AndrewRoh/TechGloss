@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using TechGloss.Core.Contracts;
 using TechGloss.Core.Services;
@@ -21,14 +20,9 @@ public sealed class TranslationOrchestrator
     }
 
     public async Task RunStreamingAsync(
-        JsonElement payload, Action<string> replyToWeb, CancellationToken ct)
+        string text, string sourceLang, string targetLang, string? categorySlug,
+        IProgress<string> onChunk, CancellationToken ct = default)
     {
-        var text = payload.GetProperty("text").GetString() ?? "";
-        var sourceLang = payload.GetProperty("source_lang").GetString() ?? "en";
-        var targetLang = payload.GetProperty("target_lang").GetString() ?? "ko";
-        var categorySlug = payload.TryGetProperty("category_slug", out var cs)
-            ? cs.GetString() : null;
-
         var requestId = Guid.NewGuid().ToString("N")[..8];
         _logger.LogInformation(
             "Translation requestId={RequestId} textHash={Hash} src={Src} tgt={Tgt}",
@@ -49,31 +43,15 @@ public sealed class TranslationOrchestrator
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "GlossaryApi unavailable — proceeding without glossary context (requestId={RequestId})",
-                requestId);
-            glossaryRows = [];   // 용어집 없이 번역 진행
+                "GlossaryApi 미응답 — 용어집 없이 번역 진행 (requestId={RequestId})", requestId);
+            glossaryRows = [];
         }
 
         var systemPrompt = PromptBuilder.BuildSystemPrompt(sourceLang, targetLang, glossaryRows);
 
-        try
+        await foreach (var chunk in _llm.StreamChatAsync(systemPrompt, text, ct))
         {
-            await foreach (var chunk in _llm.StreamChatAsync(systemPrompt, text, ct))
-            {
-                replyToWeb(JsonSerializer.Serialize(
-                    new { type = "translation.chunk", payload = chunk }));
-            }
-            replyToWeb(JsonSerializer.Serialize(new { type = "translation.done" }));
-        }
-        catch (OperationCanceledException)
-        {
-            replyToWeb(JsonSerializer.Serialize(
-                new { type = "translation.error", payload = "cancelled" }));
-        }
-        catch (Exception ex)
-        {
-            replyToWeb(JsonSerializer.Serialize(
-                new { type = "translation.error", payload = ex.Message }));
+            onChunk.Report(chunk);
         }
     }
 }

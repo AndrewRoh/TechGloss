@@ -6,6 +6,7 @@ using System.Windows;
 using TechGloss.Infrastructure;
 using TechGloss.Infrastructure.Options;
 using TechGloss.Wpf.Bridge;
+using TechGloss.Wpf.ViewModels;
 
 namespace TechGloss.Wpf;
 
@@ -23,7 +24,7 @@ public partial class App : Application
             {
                 services.AddTechGlossInfrastructure(ctx.Configuration);
                 services.AddSingleton<TranslationOrchestrator>();
-                services.AddSingleton<HostBridge>();
+                services.AddSingleton<MainViewModel>();
                 services.AddTransient<MainWindow>();
             })
             .Build();

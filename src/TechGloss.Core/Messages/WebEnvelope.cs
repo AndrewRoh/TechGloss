@@ -1,9 +1,11 @@
-using System.Text.Json;
+namespace TechGloss.Core.Models;
 
-namespace TechGloss.Core.Messages;
-
-public sealed class WebEnvelope
-{
-    public required string Type { get; init; }
-    public JsonElement Payload { get; init; }
-}
+/// <summary>
+/// ViewModel → TranslationOrchestrator 번역 요청 모델.
+/// WebView2 postMessage 방식을 대체합니다.
+/// </summary>
+public sealed record TranslationRequest(
+    string SourceText,
+    string SourceLang,
+    string TargetLang,
+    string? CategorySlug = null);

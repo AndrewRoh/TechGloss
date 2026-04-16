@@ -1,58 +1,51 @@
-using System.IO;
 using System.Windows;
-using Microsoft.Web.WebView2.Core;
-using TechGloss.Wpf.Bridge;
+using System.Windows.Documents;
+using TechGloss.Wpf.ViewModels;
 
 namespace TechGloss.Wpf;
 
 public partial class MainWindow : Window
 {
-    private readonly HostBridge _bridge;
+    private Paragraph? _currentParagraph;
 
-    public MainWindow(HostBridge bridge)
+    public MainWindow(MainViewModel vm)
     {
         InitializeComponent();
-        _bridge = bridge;
+        DataContext = vm;
+        vm.TranslationStarted += OnTranslationStarted;
+        vm.ChunkReceived += OnChunkReceived;
+        vm.CopyRequested += OnCopyRequested;
     }
 
-    private async void OnWebViewLoaded(object sender, RoutedEventArgs e)
+    private void OnTranslationStarted()
     {
-        var userDataFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TechGloss", "WebView2");
-
-        var env = await CoreWebView2Environment.CreateAsync(
-            userDataFolder: userDataFolder);
-        await webView.EnsureCoreWebView2Async(env);
-
-        var core = webView.CoreWebView2;
-
-        var distPath = Path.Combine(AppContext.BaseDirectory, "Web", "dist");
-        core.SetVirtualHostNameToFolderMapping(
-            "app.local",
-            distPath,
-            CoreWebView2HostResourceAccessKind.Allow);
-
-        core.WebMessageReceived += async (_, args) =>
+        Dispatcher.Invoke(() =>
         {
-            var json = args.WebMessageAsJson;
-            try
-            {
-                await _bridge.HandleWebMessageAsync(json, replyJson =>
-                    core.PostWebMessageAsJson(replyJson));
-            }
-            catch (Exception ex)
-            {
-                core.PostWebMessageAsJson(
-                    System.Text.Json.JsonSerializer.Serialize(
-                        new { type = "translation.error", payload = ex.Message }));
-            }
-        };
+            resultRichTextBox.Document.Blocks.Clear();
+            _currentParagraph = new Paragraph();
+            resultRichTextBox.Document.Blocks.Add(_currentParagraph);
+        });
+    }
 
-#if DEBUG
-        core.OpenDevToolsWindow();
-#endif
+    private void OnChunkReceived(string chunk)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _currentParagraph ??= new Paragraph();
+            if (!resultRichTextBox.Document.Blocks.Contains(_currentParagraph))
+                resultRichTextBox.Document.Blocks.Add(_currentParagraph);
+            _currentParagraph.Inlines.Add(new Run(chunk));
+            resultRichTextBox.ScrollToEnd();
+        });
+    }
 
-        core.Navigate("https://app.local/index.html");
+    private void OnCopyRequested()
+    {
+        var range = new TextRange(
+            resultRichTextBox.Document.ContentStart,
+            resultRichTextBox.Document.ContentEnd);
+        var text = range.Text.Trim();
+        if (!string.IsNullOrEmpty(text))
+            Clipboard.SetText(text);
     }
 }
