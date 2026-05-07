@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using TechGloss.Core.Contracts;
+using TechGloss.Core.Models;
 using TechGloss.GlossaryApi.Data;
+using TechGloss.GlossaryApi.Services;
 
 namespace TechGloss.GlossaryApi.Endpoints;
 
@@ -8,39 +10,61 @@ public static class SearchEndpoint
 {
     public static void MapSearch(this WebApplication app)
     {
+        // EmbeddingService? / QdrantService?: 두 서비스가 모두 등록된 경우 → Qdrant 벡터 검색
+        // 하나라도 null이면 → SQL LIKE fallback (MVP 모드)
         app.MapPost("/glossary/search", async (
-            GlossarySearchRequest req, GlossaryDbContext db, CancellationToken ct) =>
+            GlossarySearchRequest req,
+            GlossaryDbContext db,
+            EmbeddingService? embedder,
+            QdrantService? qdrant,
+            CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(req.QueryText))
                 return Results.Ok(Array.Empty<GlossarySearchRow>());
 
-            var pattern = $"%{req.QueryText.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_")}%";
+            List<GlossaryEntry> entries;
 
-            // CategoryName 필터 적용 (선택)
-            Guid? filterCategoryId = null;
-            if (!string.IsNullOrWhiteSpace(req.CategoryName))
+            if (embedder is not null && qdrant is not null)
             {
-                var cat = await db.Categories.AsNoTracking()
-                    .FirstOrDefaultAsync(c => c.Name == req.CategoryName, ct);
-                if (cat is not null) filterCategoryId = cat.Id;
+                // Phase D: Qdrant 코사인 유사도 검색
+                var vector  = await embedder.EmbedAsync(req.QueryText, ct);
+                var hitIds  = await qdrant.SearchAsync(vector, (uint)req.TopK, req.CategoryName, ct);
+
+                // Qdrant 결과 순서(유사도 내림차순) 유지를 위해 orderMap 사용
+                var orderMap = hitIds.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
+                entries = (await db.Entries.AsNoTracking()
+                    .Where(e => hitIds.Contains(e.Id))
+                    .ToListAsync(ct))
+                    .OrderBy(e => orderMap.TryGetValue(e.Id, out var i) ? i : int.MaxValue)
+                    .ToList();
+            }
+            else
+            {
+                // MVP fallback: SQL LIKE
+                var pattern = $"%{req.QueryText.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_")}%";
+
+                Guid? filterCategoryId = null;
+                if (!string.IsNullOrWhiteSpace(req.CategoryName))
+                {
+                    var cat = await db.Categories.AsNoTracking()
+                        .FirstOrDefaultAsync(c => c.Name == req.CategoryName, ct);
+                    if (cat is not null) filterCategoryId = cat.Id;
+                }
+
+                var query = db.Entries.AsNoTracking()
+                    .Where(e => e.Status == "published")
+                    .Where(e =>
+                        EF.Functions.Like(e.TermEn, pattern, "\\") ||
+                        EF.Functions.Like(e.TermKo, pattern, "\\") ||
+                        EF.Functions.Like(e.DefinitionKo, pattern, "\\"));
+
+                if (filterCategoryId.HasValue)
+                    query = query.Where(e => e.CategoryId == filterCategoryId);
+
+                entries = await query.OrderBy(e => e.TermEn).Take(req.TopK).ToListAsync(ct);
             }
 
-            var query = db.Entries.AsNoTracking()
-                .Where(e => e.Status == "published")
-                .Where(e =>
-                    EF.Functions.Like(e.TermEn, pattern, "\\") ||
-                    EF.Functions.Like(e.TermKo, pattern, "\\") ||
-                    EF.Functions.Like(e.DefinitionKo, pattern, "\\"));
-
-            if (filterCategoryId.HasValue)
-                query = query.Where(e => e.CategoryId == filterCategoryId);
-
-            var entries = await query
-                .OrderBy(e => e.TermEn)
-                .Take(req.TopK)
-                .ToListAsync(ct);
-
-            // CategoryId → CategoryName 조회
+            // CategoryId → CategoryName 조회 (공통)
             var categoryIds = entries
                 .Where(e => e.CategoryId.HasValue)
                 .Select(e => e.CategoryId!.Value)
