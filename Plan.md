@@ -1151,6 +1151,16 @@ git add src/TechGloss.GlossaryApi tests/TechGloss.GlossaryApi.Tests
 git commit -m "feat: add GlossaryApi with DB schema, lookup endpoint, and seed data"
 ```
 
+> **[로드맵 노트]**
+> Task 3 (현재): SQLite + LIKE 검색으로 MVP 완성
+> ↓
+> Task 7 (Phase D): Qdrant 도입 → EmbeddingService 구현 → `/api/embeddings` 연결
+>
+> Task 7에서 다음 세 가지를 동시에 구현한다:
+> 1. `EmbeddingService.EmbedAsync()` — Ollama `/api/embeddings` POST
+> 2. Qdrant 컬렉션에 벡터 upsert (`GlossaryEntry.Id` = Qdrant point id)
+> 3. `/glossary/search` 내부를 SQL LIKE → Qdrant 코사인 유사도로 교체
+
 ---
 
 ## Task 4: WPF 셸 + WebView2 부트스트랩 + postMessage 브리지
@@ -2022,7 +2032,16 @@ git commit -m "feat: add PromptBuilder with EN/KO guidelines and TranslationOrch
 
 ---
 
-## Task 7: GlossaryApi — search / upsert / publish 엔드포인트
+## Task 7: GlossaryApi — search / upsert / publish 엔드포인트 (Phase D: Qdrant RAG)
+
+> **Phase D 구현 목표 (Task 3 MVP → 실제 벡터 RAG로 전환)**
+>
+> 다음 세 가지를 동시에 구현한다:
+> 1. **`EmbeddingService.EmbedAsync()`** — Ollama `POST /api/embeddings` 호출 (`nomic-embed-text` 모델, 768차원 float[])
+> 2. **Qdrant 컬렉션에 벡터 upsert** — `GlossaryEntry.Id`(Guid) = Qdrant point id로 동일 값 유지해 SQL ↔ 벡터 동기화 단순화. `/glossary/upsert` 및 `/glossary/publish` 시 자동 인덱싱.
+> 3. **`/glossary/search` 내부 교체** — SQL LIKE → Qdrant 코사인 유사도 검색으로 전환. API 계약(입출력 DTO)은 그대로 유지하므로 WPF 쪽 코드 변경 없음.
+>
+> 전환 전략: `EmbeddingService` 주입 여부로 MVP 모드(SQL LIKE)와 Phase D 모드(Qdrant) 런타임 전환 가능하도록 설계.
 
 **Files:**
 - Modify: `src/TechGloss.GlossaryApi/Program.cs` (엔드포인트 추가)
