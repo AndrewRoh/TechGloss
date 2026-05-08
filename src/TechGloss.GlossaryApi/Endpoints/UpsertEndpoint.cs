@@ -12,8 +12,7 @@ public static class UpsertEndpoint
         app.MapPost("/glossary/upsert", async (
             GlossaryEntry entry,
             GlossaryDbContext db,
-            EmbeddingService? embedder,
-            QdrantService? qdrant,
+            IServiceProvider sp,
             ILogger<Program> logger,
             CancellationToken ct) =>
         {
@@ -36,9 +35,12 @@ public static class UpsertEndpoint
             await db.SaveChangesAsync(ct);
 
             // published 상태인 항목이 수정된 경우 Qdrant 벡터도 갱신
-            if (entry.Status == "published" && embedder is not null && qdrant is not null)
+            if (entry.Status == "published")
             {
-                await IndexToQdrantAsync(entry, db, embedder, qdrant, logger, ct);
+                var embedder = sp.GetService<EmbeddingService>();
+                var qdrant   = sp.GetService<QdrantService>();
+                if (embedder is not null && qdrant is not null)
+                    await IndexToQdrantAsync(entry, db, embedder, qdrant, logger, ct);
             }
 
             return Results.Ok(new { entry.Id });
@@ -47,8 +49,7 @@ public static class UpsertEndpoint
         app.MapPost("/glossary/publish", async (
             PublishRequest req,
             GlossaryDbContext db,
-            EmbeddingService? embedder,
-            QdrantService? qdrant,
+            IServiceProvider sp,
             ILogger<Program> logger,
             CancellationToken ct) =>
         {
@@ -60,10 +61,10 @@ public static class UpsertEndpoint
             await db.SaveChangesAsync(ct);
 
             // Phase D: published 전환 시 Qdrant 벡터 인덱스 등록
+            var embedder = sp.GetService<EmbeddingService>();
+            var qdrant   = sp.GetService<QdrantService>();
             if (embedder is not null && qdrant is not null)
-            {
                 await IndexToQdrantAsync(entry, db, embedder, qdrant, logger, ct);
-            }
 
             return Results.Ok();
         });
