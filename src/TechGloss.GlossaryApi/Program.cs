@@ -14,8 +14,7 @@ builder.Services.AddDbContext<GlossaryDbContext>(opt =>
 builder.Services.AddHttpClient<EmbeddingService>(c =>
     c.Timeout = TimeSpan.FromSeconds(60));
 
-// TermExtractionService: Scoped — DbContext와 수명 일치
-builder.Services.AddScoped<TermExtractionService>();
+// TermExtractionService: AddHttpClient이 Transient으로 등록 (DbContext는 파라미터로 주입)
 builder.Services.AddHttpClient<TermExtractionService>(c =>
     c.Timeout = TimeSpan.FromSeconds(60));
 
@@ -53,8 +52,6 @@ using (var scope = app.Services.CreateScope())
             app.Logger.LogWarning(ex, "Qdrant 연결 실패 — MVP 모드(SQL LIKE)로 폴백");
         }
     }
-
-    await SeedIfEmptyAsync(db);
 }
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", time = DateTime.UtcNow }));
@@ -90,24 +87,6 @@ static async Task ApplyMigrationSqlAsync(string connStr, ILogger logger)
         try { await cmd.ExecuteNonQueryAsync(); }
         catch (Exception ex) when (ex.Message.Contains("already exists"))
         { /* IF NOT EXISTS로 처리했지만 일부 SQLite 버전 예외 허용 */ }
-    }
-}
-
-static async Task SeedIfEmptyAsync(GlossaryDbContext db)
-{
-    if (await db.Entries.AnyAsync()) return;
-
-    var seedPath = Path.Combine(AppContext.BaseDirectory, "Data", "seed.json");
-    if (!File.Exists(seedPath)) return;
-
-    var json = await File.ReadAllTextAsync(seedPath);
-    var entries = System.Text.Json.JsonSerializer.Deserialize<List<TechGloss.Core.Models.GlossaryEntry>>(json,
-        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-    if (entries is { Count: > 0 })
-    {
-        db.Entries.AddRange(entries);
-        await db.SaveChangesAsync();
     }
 }
 

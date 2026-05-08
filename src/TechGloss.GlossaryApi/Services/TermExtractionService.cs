@@ -3,21 +3,22 @@ using Microsoft.EntityFrameworkCore;
 using TechGloss.Core.Contracts;
 using TechGloss.Core.Models;
 using TechGloss.GlossaryApi.Data;
+using TechGloss.GlossaryApi.Models;
 
 namespace TechGloss.GlossaryApi.Services;
 
-// CLAUDE.md ExtractTerms 흐름 구현
-// Ollama로 IT 용어 쌍 추출 → GlossaryEntry draft upsert
+// 번역 완료 후 Ollama로 IT 용어 쌍 추출 → GlossaryEntry published 즉시 저장 + Qdrant 인덱싱
 // 추출 실패(파싱 오류·Ollama 미응답)는 경고 로그만 남기고 빈 배열 반환
 public sealed class TermExtractionService
 {
     private readonly HttpClient _http;
     private readonly GlossaryDbContext _db;
     private readonly ILogger<TermExtractionService> _logger;
+    private readonly EmbeddingService? _embedder;
+    private readonly QdrantService? _qdrant;
     private readonly string _baseUrl;
     private readonly string _model;
 
-    // 카테고리 허용 목록 (CLAUDE.md 명시) — 대소문자 무관 매칭, 불일치 시 "General" 대체
     private static readonly HashSet<string> AllowedCategories = new(StringComparer.OrdinalIgnoreCase)
     {
         "General", "Cloud", "Frontend", "Backend", "Dotnet",
@@ -25,12 +26,18 @@ public sealed class TermExtractionService
     };
 
     public TermExtractionService(
-        HttpClient http, GlossaryDbContext db,
-        ILogger<TermExtractionService> logger, IConfiguration config)
+        HttpClient http,
+        GlossaryDbContext db,
+        ILogger<TermExtractionService> logger,
+        IConfiguration config,
+        EmbeddingService? embedder = null,
+        QdrantService? qdrant = null)
     {
         _http    = http;
         _db      = db;
         _logger  = logger;
+        _embedder = embedder;
+        _qdrant   = qdrant;
         _baseUrl = config["TechGloss:Ollama:BaseUrl"] ?? "http://172.20.64.76:11434";
         _model   = config["TechGloss:Ollama:Model"]  ?? "gemma4:latest";
     }
@@ -42,7 +49,6 @@ public sealed class TermExtractionService
             string.IsNullOrWhiteSpace(req.TranslatedText))
             return new List<ExtractedTermRow>();
 
-        // Ollama에게 JSON 배열 형식으로 용어 쌍 추출 요청 (stream: false — 단일 응답 필요)
         var prompt =
             "다음 EN/KO 텍스트 쌍에서 IT 기술 용어 쌍을 JSON 배열로 추출하세요.\n" +
             "출력 형식: [{\"term_en\":\"...\",\"term_ko\":\"...\",\"category\":\"...\",\"definition_ko\":\"...\"}]\n" +
@@ -67,7 +73,6 @@ public sealed class TermExtractionService
 
             using var doc = await JsonDocument.ParseAsync(
                 await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-            // Ollama /api/chat non-stream 응답: { "message": { "content": "..." } }
             rawJson = doc.RootElement
                 .GetProperty("message")
                 .GetProperty("content")
@@ -79,7 +84,6 @@ public sealed class TermExtractionService
             return new List<ExtractedTermRow>();
         }
 
-        // LLM 출력에서 마크다운 코드 블록 제거 후 JSON 파싱
         var jsonText = rawJson.Trim();
         if (jsonText.StartsWith("```"))
         {
@@ -110,27 +114,24 @@ public sealed class TermExtractionService
             if (string.IsNullOrWhiteSpace(term.TermEn) || string.IsNullOrWhiteSpace(term.TermKo))
                 continue;
 
-            // 카테고리 허용 목록 검증 — 불일치 시 "General" 대체
             var categoryName = AllowedCategories.Contains(term.Category ?? "")
                 ? term.Category! : "General";
 
-            // TermEnNormalized 기준 중복 확인 (CLAUDE.md 명시)
             var enNorm = term.TermEn.Trim().ToLowerInvariant();
             var existing = await _db.Entries.AsNoTracking()
                 .Where(e => e.TermEnNormalized == enNorm)
                 .FirstOrDefaultAsync(ct);
 
             bool isNew;
-            Guid entryId;
+            GlossaryEntry entry;
 
             if (existing is null)
             {
-                // 신규: GlossaryEntry INSERT (status=draft)
                 var cat = await _db.Categories.AsNoTracking()
                     .Where(c => c.Name == categoryName)
                     .FirstOrDefaultAsync(ct);
 
-                var entry = new GlossaryEntry
+                entry = new GlossaryEntry
                 {
                     Id               = Guid.NewGuid(),
                     TermEn           = term.TermEn.Trim(),
@@ -141,44 +142,114 @@ public sealed class TermExtractionService
                                            .ToLowerInvariant(),
                     DefinitionKo     = term.DefinitionKo ?? "",
                     CategoryId       = cat?.Id,
-                    Status           = "draft",
+                    Status           = "published",   // 번역 추출 → 즉시 published
                     CreatedAt        = DateTimeOffset.UtcNow,
                     UpdatedAt        = DateTimeOffset.UtcNow,
                 };
                 _db.Entries.Add(entry);
-                entryId = entry.Id;
-                isNew   = true;
+                isNew = true;
             }
             else
             {
-                // 기존: TermKo가 비어있을 때만 보완 (CLAUDE.md 규칙)
-                entryId = existing.Id;
-                isNew   = false;
+                entry = existing;
+                isNew = false;
+
+                var updated = false;
                 if (string.IsNullOrWhiteSpace(existing.TermKo))
                 {
-                    await _db.Entries
-                        .Where(e => e.Id == existing.Id)
-                        .ExecuteUpdateAsync(s => s
-                            .SetProperty(e => e.TermKo, term.TermKo.Trim())
-                            .SetProperty(e => e.UpdatedAt, DateTimeOffset.UtcNow), ct);
+                    existing.TermKo           = term.TermKo.Trim();
+                    existing.TermKoNormalized = term.TermKo.Trim()
+                        .Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant();
+                    updated = true;
                 }
+                // draft 상태인 기존 항목도 이번 번역에서 재등장했으면 published로 승격
+                if (existing.Status == "draft")
+                {
+                    existing.Status = "published";
+                    updated = true;
+                }
+                if (updated) existing.UpdatedAt = DateTimeOffset.UtcNow;
             }
 
             results.Add(new ExtractedTermRow
             {
-                EntryId      = entryId,
-                TermEn       = term.TermEn.Trim(),
-                TermKo       = term.TermKo.Trim(),
+                EntryId      = entry.Id,
+                TermEn       = entry.TermEn,
+                TermKo       = entry.TermKo,
                 CategoryName = categoryName,
                 IsNew        = isNew,
             });
         }
 
         await _db.SaveChangesAsync(ct);
+
+        // Qdrant 인덱싱 — EmbeddingService·QdrantService 둘 다 등록된 경우에만 실행
+        if (_embedder is not null && _qdrant is not null)
+        {
+            foreach (var row in results)
+            {
+                await IndexToQdrantAsync(row.EntryId, row.CategoryName, ct);
+            }
+        }
+
+        _logger.LogInformation(
+            "용어 자동 추출 완료: 총 {Total}건 (신규 {New}건, Qdrant={Qdrant})",
+            results.Count,
+            results.Count(r => r.IsNew),
+            _qdrant is not null ? "활성" : "비활성");
+
         return results;
     }
 
-    // Ollama 응답 JSON 파싱용 내부 레코드 — camelCase 매핑
+    private async Task IndexToQdrantAsync(
+        Guid entryId, string categoryName, CancellationToken ct)
+    {
+        try
+        {
+            var entry = await _db.Entries.AsNoTracking()
+                .FirstOrDefaultAsync(e => e.Id == entryId, ct);
+            if (entry is null) return;
+
+            var embedText = EmbeddingService.BuildEmbedText(
+                categoryName, entry.TermEn, entry.TermKo, entry.DefinitionKo);
+            var vector = await _embedder!.EmbedAsync(embedText, ct);
+
+            await _qdrant!.UpsertPointAsync(
+                entry.Id, vector, entry.TermEn, entry.TermKo, categoryName, ct);
+
+            var hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(embedText)))[..16];
+
+            var state = await _db.EmbeddingStates.FindAsync(new object[] { entry.Id }, ct);
+            if (state is null)
+            {
+                _db.EmbeddingStates.Add(new GlossaryEmbeddingState
+                {
+                    EntryId        = entry.Id,
+                    EmbedModel     = "nomic-embed-text",
+                    EmbedDimension = vector.Length,
+                    EmbedTextHash  = hash,
+                    VectorStore    = "qdrant",
+                    VectorPointId  = entry.Id.ToString(),
+                    LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O"),
+                });
+            }
+            else
+            {
+                state.EmbedTextHash  = hash;
+                state.VectorStore    = "qdrant";
+                state.LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O");
+                state.LastError      = null;
+            }
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Qdrant 인덱싱 실패: EntryId={EntryId}", entryId);
+        }
+    }
+
     private sealed record RawTerm(
         string? TermEn,
         string? TermKo,
