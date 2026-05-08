@@ -3,11 +3,10 @@ using Microsoft.EntityFrameworkCore;
 using TechGloss.Core.Contracts;
 using TechGloss.Core.Models;
 using TechGloss.GlossaryApi.Data;
-using TechGloss.GlossaryApi.Models;
 
 namespace TechGloss.GlossaryApi.Services;
 
-// 번역 완료 후 Ollama로 IT 용어 쌍 추출 → GlossaryEntry published 즉시 저장 + Qdrant 인덱싱
+// 번역 완료 후 Ollama로 IT 용어 쌍 추출 → GlossaryEntry published 즉시 저장 + pgvector 임베딩
 // 추출 실패(파싱 오류·Ollama 미응답)는 경고 로그만 남기고 빈 배열 반환
 public sealed class TermExtractionService
 {
@@ -15,7 +14,6 @@ public sealed class TermExtractionService
     private readonly GlossaryDbContext _db;
     private readonly ILogger<TermExtractionService> _logger;
     private readonly EmbeddingService? _embedder;
-    private readonly QdrantService? _qdrant;
     private readonly string _baseUrl;
     private readonly string _model;
 
@@ -30,16 +28,14 @@ public sealed class TermExtractionService
         GlossaryDbContext db,
         ILogger<TermExtractionService> logger,
         IConfiguration config,
-        EmbeddingService? embedder = null,
-        QdrantService? qdrant = null)
+        EmbeddingService? embedder = null)
     {
-        _http    = http;
-        _db      = db;
-        _logger  = logger;
+        _http     = http;
+        _db       = db;
+        _logger   = logger;
         _embedder = embedder;
-        _qdrant   = qdrant;
-        _baseUrl = config["TechGloss:Ollama:BaseUrl"] ?? "http://172.20.64.76:11434";
-        _model   = config["TechGloss:Ollama:Model"]  ?? "gemma4:latest";
+        _baseUrl  = config["TechGloss:Ollama:BaseUrl"] ?? "http://172.20.64.76:11434";
+        _model    = config["TechGloss:Ollama:Model"]   ?? "gemma4:latest";
     }
 
     public async Task<List<ExtractedTermRow>> ExtractAsync(
@@ -107,7 +103,8 @@ public sealed class TermExtractionService
 
         if (terms is null or { Count: 0 }) return new List<ExtractedTermRow>();
 
-        var results = new List<ExtractedTermRow>();
+        var results    = new List<ExtractedTermRow>();
+        var newEntries = new List<(GlossaryEntry entry, string categoryName)>();
 
         foreach (var term in terms)
         {
@@ -117,7 +114,7 @@ public sealed class TermExtractionService
             var categoryName = AllowedCategories.Contains(term.Category ?? "")
                 ? term.Category! : "General";
 
-            var enNorm = term.TermEn.Trim().ToLowerInvariant();
+            var enNorm   = term.TermEn.Trim().ToLowerInvariant();
             var existing = await _db.Entries.AsNoTracking()
                 .Where(e => e.TermEnNormalized == enNorm)
                 .FirstOrDefaultAsync(ct);
@@ -142,33 +139,18 @@ public sealed class TermExtractionService
                                            .ToLowerInvariant(),
                     DefinitionKo     = term.DefinitionKo ?? "",
                     CategoryId       = cat?.Id,
-                    Status           = "published",   // 번역 추출 → 즉시 published
+                    Status           = "published",
                     CreatedAt        = DateTimeOffset.UtcNow,
                     UpdatedAt        = DateTimeOffset.UtcNow,
                 };
                 _db.Entries.Add(entry);
                 isNew = true;
+                newEntries.Add((entry, categoryName));
             }
             else
             {
                 entry = existing;
                 isNew = false;
-
-                var updated = false;
-                if (string.IsNullOrWhiteSpace(existing.TermKo))
-                {
-                    existing.TermKo           = term.TermKo.Trim();
-                    existing.TermKoNormalized = term.TermKo.Trim()
-                        .Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant();
-                    updated = true;
-                }
-                // draft 상태인 기존 항목도 이번 번역에서 재등장했으면 published로 승격
-                if (existing.Status == "draft")
-                {
-                    existing.Status = "published";
-                    updated = true;
-                }
-                if (updated) existing.UpdatedAt = DateTimeOffset.UtcNow;
             }
 
             results.Add(new ExtractedTermRow
@@ -183,71 +165,34 @@ public sealed class TermExtractionService
 
         await _db.SaveChangesAsync(ct);
 
-        // Qdrant 인덱싱 — EmbeddingService·QdrantService 둘 다 등록된 경우에만 실행
-        if (_embedder is not null && _qdrant is not null)
+        // pgvector 임베딩 — EmbeddingService 등록된 경우에만 신규 항목에 대해 실행
+        if (_embedder is not null)
         {
-            foreach (var row in results)
+            foreach (var (entry, catName) in newEntries)
             {
-                await IndexToQdrantAsync(row.EntryId, row.CategoryName, ct);
+                try
+                {
+                    var embedText = EmbeddingService.BuildEmbedText(
+                        catName, entry.TermEn, entry.TermKo, entry.DefinitionKo);
+                    entry.Embedding = await _embedder.EmbedAsync(embedText, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "임베딩 실패: EntryId={EntryId}", entry.Id);
+                }
             }
+
+            if (newEntries.Count > 0)
+                await _db.SaveChangesAsync(ct);
         }
 
         _logger.LogInformation(
-            "용어 자동 추출 완료: 총 {Total}건 (신규 {New}건, Qdrant={Qdrant})",
+            "용어 자동 추출 완료: 총 {Total}건 (신규 {New}건, 임베딩={Embed})",
             results.Count,
             results.Count(r => r.IsNew),
-            _qdrant is not null ? "활성" : "비활성");
+            _embedder is not null ? "활성" : "비활성");
 
         return results;
-    }
-
-    private async Task IndexToQdrantAsync(
-        Guid entryId, string categoryName, CancellationToken ct)
-    {
-        try
-        {
-            var entry = await _db.Entries.AsNoTracking()
-                .FirstOrDefaultAsync(e => e.Id == entryId, ct);
-            if (entry is null) return;
-
-            var embedText = EmbeddingService.BuildEmbedText(
-                categoryName, entry.TermEn, entry.TermKo, entry.DefinitionKo);
-            var vector = await _embedder!.EmbedAsync(embedText, ct);
-
-            await _qdrant!.UpsertPointAsync(
-                entry.Id, vector, entry.TermEn, entry.TermKo, categoryName, ct);
-
-            var hash = Convert.ToHexString(
-                System.Security.Cryptography.SHA256.HashData(
-                    System.Text.Encoding.UTF8.GetBytes(embedText)))[..16];
-
-            var state = await _db.EmbeddingStates.FindAsync(new object[] { entry.Id }, ct);
-            if (state is null)
-            {
-                _db.EmbeddingStates.Add(new GlossaryEmbeddingState
-                {
-                    EntryId        = entry.Id,
-                    EmbedModel     = "nomic-embed-text",
-                    EmbedDimension = vector.Length,
-                    EmbedTextHash  = hash,
-                    VectorStore    = "qdrant",
-                    VectorPointId  = entry.Id.ToString(),
-                    LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O"),
-                });
-            }
-            else
-            {
-                state.EmbedTextHash  = hash;
-                state.VectorStore    = "qdrant";
-                state.LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O");
-                state.LastError      = null;
-            }
-            await _db.SaveChangesAsync(ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Qdrant 인덱싱 실패: EntryId={EntryId}", entryId);
-        }
     }
 
     private sealed record RawTerm(

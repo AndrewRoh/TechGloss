@@ -13,6 +13,7 @@ public sealed class GlossaryEntry
     public bool CaseSensitive { get; set; } = false;
     public bool IsPreferred { get; set; } = true;
     public string Status { get; set; } = "draft";
+    public float[]? Embedding { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }

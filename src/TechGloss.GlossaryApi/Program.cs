@@ -1,33 +1,30 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Data.Sqlite;
+using Npgsql;
 using TechGloss.GlossaryApi.Data;
 using TechGloss.GlossaryApi.Endpoints;
 using TechGloss.GlossaryApi.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var connStr = builder.Configuration.GetConnectionString("Glossary")
+    ?? "Host=localhost;Port=5432;Database=techgloss;Username=postgres;Password=postgres";
+
+// NpgsqlDataSource with pgvector 타입 등록
+var dataSourceBuilder = new NpgsqlDataSourceBuilder(connStr);
+dataSourceBuilder.UseVector();
+var dataSource = dataSourceBuilder.Build();
+
 builder.Services.AddDbContext<GlossaryDbContext>(opt =>
-    opt.UseSqlite(builder.Configuration.GetConnectionString("Glossary")
-        ?? "Data Source=glossary.db"));
+    opt.UseNpgsql(dataSource)
+       .UseSnakeCaseNamingConvention());
 
 // 임베딩 서비스 — Ollama HttpClient
 builder.Services.AddHttpClient<EmbeddingService>(c =>
     c.Timeout = TimeSpan.FromSeconds(60));
 
-// TermExtractionService: AddHttpClient이 Transient으로 등록 (DbContext는 파라미터로 주입)
+// TermExtractionService
 builder.Services.AddHttpClient<TermExtractionService>(c =>
     c.Timeout = TimeSpan.FromSeconds(60));
-
-// Phase D: Qdrant REST API 클라이언트 — Qdrant:Endpoint 설정 시 활성화
-var qdrantEndpoint = builder.Configuration["Qdrant:Endpoint"];
-if (!string.IsNullOrWhiteSpace(qdrantEndpoint))
-{
-    builder.Services.AddHttpClient<QdrantService>(c =>
-    {
-        c.BaseAddress = new Uri(qdrantEndpoint);
-        c.Timeout = TimeSpan.FromSeconds(30);
-    });
-}
 
 var app = builder.Build();
 
@@ -35,22 +32,33 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<GlossaryDbContext>();
 
-    // 001_initial.sql 실행 — FTS5 가상 테이블·트리거·UNIQUE 인덱스 생성 (IF NOT EXISTS 안전)
-    var connStr = builder.Configuration.GetConnectionString("Glossary") ?? "Data Source=glossary.db";
-    await ApplyMigrationSqlAsync(connStr, app.Logger);
-
-    // EF Core: 기본 테이블 보장 (위 SQL과 중복이지만 EF 매핑 테이블 검증용)
-    db.Database.EnsureCreated();
-
-    // Phase D: Qdrant 컬렉션 초기화 (등록된 경우에만)
-    var qdrantSvc = scope.ServiceProvider.GetService<QdrantService>();
-    if (qdrantSvc is not null)
+    if (db.Database.IsNpgsql())
     {
-        try { await qdrantSvc.EnsureCollectionAsync(); }
+        // pgvector 확장 활성화 (테이블 생성 전 필수)
+        await db.Database.ExecuteSqlRawAsync("CREATE EXTENSION IF NOT EXISTS vector");
+
+        // EF Core: 테이블 생성
+        db.Database.EnsureCreated();
+
+        // HNSW 코사인 유사도 인덱스 생성 (embedding 컬럼이 있는 경우만)
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(@"
+                CREATE INDEX IF NOT EXISTS idx_entry_embedding_hnsw
+                    ON glossary_entry USING hnsw (embedding vector_cosine_ops)
+                    WITH (m = 16, ef_construction = 64)");
+        }
         catch (Exception ex)
         {
-            app.Logger.LogWarning(ex, "Qdrant 연결 실패 — MVP 모드(SQL LIKE)로 폴백");
+            app.Logger.LogWarning(ex, "HNSW 인덱스 생성 실패 (embedding 컬럼 없을 경우 무시)");
         }
+
+        await SeedIfEmptyAsync(db, app.Logger);
+    }
+    else
+    {
+        // 테스트 환경 (InMemory 등)
+        db.Database.EnsureCreated();
     }
 }
 
@@ -62,31 +70,32 @@ app.MapExtractTerms();
 
 app.Run();
 
-// 001_initial.sql을 SQLite 연결로 직접 실행 — EF가 모르는 FTS5/트리거/추가 인덱스 생성
-static async Task ApplyMigrationSqlAsync(string connStr, ILogger logger)
+static async Task SeedIfEmptyAsync(GlossaryDbContext db, ILogger logger)
 {
-    var sqlPath = Path.Combine(AppContext.BaseDirectory, "Data", "Migrations", "001_initial.sql");
-    if (!File.Exists(sqlPath))
+    if (await db.Entries.AnyAsync()) return;
+
+    var seedPath = Path.Combine(AppContext.BaseDirectory, "Data", "seed.json");
+    if (!File.Exists(seedPath))
     {
-        logger.LogWarning("마이그레이션 파일 없음: {Path}", sqlPath);
+        logger.LogInformation("seed.json 없음 — 시드 건너뜀");
         return;
     }
 
-    var sql = await File.ReadAllTextAsync(sqlPath);
-    // 세미콜론 구분 실행 (CREATE TABLE/INDEX/TRIGGER/VIRTUAL TABLE 각각)
-    var statements = sql
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Where(s => !string.IsNullOrWhiteSpace(s));
-
-    await using var conn = new SqliteConnection(connStr);
-    await conn.OpenAsync();
-    foreach (var stmt in statements)
+    try
     {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = stmt;
-        try { await cmd.ExecuteNonQueryAsync(); }
-        catch (Exception ex) when (ex.Message.Contains("already exists"))
-        { /* IF NOT EXISTS로 처리했지만 일부 SQLite 버전 예외 허용 */ }
+        var json = await File.ReadAllTextAsync(seedPath);
+        var entries = System.Text.Json.JsonSerializer.Deserialize<List<TechGloss.Core.Models.GlossaryEntry>>(json,
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (entries is { Count: > 0 })
+        {
+            db.Entries.AddRange(entries);
+            await db.SaveChangesAsync();
+            logger.LogInformation("시드 데이터 {Count}건 삽입", entries.Count);
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "시드 삽입 실패 — 무시하고 계속");
     }
 }
 

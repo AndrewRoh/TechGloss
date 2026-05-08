@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using TechGloss.Core.Models;
 using TechGloss.GlossaryApi.Data;
-using TechGloss.GlossaryApi.Models;
 using TechGloss.GlossaryApi.Services;
 
 namespace TechGloss.GlossaryApi.Endpoints;
@@ -35,13 +34,12 @@ public static class UpsertEndpoint
             }
             await db.SaveChangesAsync(ct);
 
-            // published 상태인 항목이 수정된 경우 Qdrant 벡터도 갱신
+            // published 상태면 embedding 갱신
             if (entry.Status == "published")
             {
                 var embedder = sp.GetService<EmbeddingService>();
-                var qdrant   = sp.GetService<QdrantService>();
-                if (embedder is not null && qdrant is not null)
-                    await IndexToQdrantAsync(entry, db, embedder, qdrant, logger, ct);
+                if (embedder is not null)
+                    await EmbedEntryAsync(entry, db, embedder, logger, ct);
             }
 
             return Results.Ok(new { entry.Id });
@@ -61,22 +59,18 @@ public static class UpsertEndpoint
             entry.UpdatedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(ct);
 
-            // Phase D: published 전환 시 Qdrant 벡터 인덱스 등록
             var embedder = sp.GetService<EmbeddingService>();
-            var qdrant   = sp.GetService<QdrantService>();
-            if (embedder is not null && qdrant is not null)
-                await IndexToQdrantAsync(entry, db, embedder, qdrant, logger, ct);
+            if (embedder is not null)
+                await EmbedEntryAsync(entry, db, embedder, logger, ct);
 
             return Results.Ok();
         });
     }
 
-    // upsert/publish 공통 Qdrant 인덱싱 — 실패 시 경고만, DB 저장 결과에 영향 없음
-    private static async Task IndexToQdrantAsync(
+    private static async Task EmbedEntryAsync(
         GlossaryEntry entry,
         GlossaryDbContext db,
         EmbeddingService embedder,
-        QdrantService qdrant,
         ILogger logger,
         CancellationToken ct)
     {
@@ -92,43 +86,12 @@ public static class UpsertEndpoint
 
             var embedText = EmbeddingService.BuildEmbedText(
                 categoryName, entry.TermEn, entry.TermKo, entry.DefinitionKo);
-            var vector = await embedder.EmbedAsync(embedText, ct);
-
-            await qdrant.UpsertPointAsync(
-                entry.Id, vector,
-                entry.TermEn, entry.TermKo, categoryName, ct);
-
-            // embedding_state 기록 — 재임베딩 필요 여부 추적
-            var hash = Convert.ToHexString(
-                System.Security.Cryptography.SHA256.HashData(
-                    System.Text.Encoding.UTF8.GetBytes(embedText)))[..16];
-
-            var state = await db.EmbeddingStates.FindAsync(new object[] { entry.Id }, ct);
-            if (state is null)
-            {
-                db.EmbeddingStates.Add(new GlossaryEmbeddingState
-                {
-                    EntryId        = entry.Id,
-                    EmbedModel     = "nomic-embed-text",
-                    EmbedDimension = vector.Length,
-                    EmbedTextHash  = hash,
-                    VectorStore    = "qdrant",
-                    VectorPointId  = entry.Id.ToString(),
-                    LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O"),
-                });
-            }
-            else
-            {
-                state.EmbedTextHash  = hash;
-                state.VectorStore    = "qdrant";
-                state.LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O");
-                state.LastError      = null;
-            }
+            entry.Embedding = await embedder.EmbedAsync(embedText, ct);
             await db.SaveChangesAsync(ct);
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Qdrant 인덱싱 실패: EntryId={EntryId}", entry.Id);
+            logger.LogWarning(ex, "임베딩 실패: EntryId={EntryId}", entry.Id);
         }
     }
 }

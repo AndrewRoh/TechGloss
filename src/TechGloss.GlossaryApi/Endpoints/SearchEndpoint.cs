@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Pgvector;
 using TechGloss.Core.Contracts;
 using TechGloss.Core.Models;
 using TechGloss.GlossaryApi.Data;
@@ -10,7 +11,6 @@ public static class SearchEndpoint
 {
     public static void MapSearch(this WebApplication app)
     {
-        // IServiceProvider로 optional 서비스 resolve — 미등록 시 null → SQL LIKE fallback
         app.MapPost("/glossary/search", async (
             GlossarySearchRequest req,
             GlossaryDbContext db,
@@ -18,8 +18,7 @@ public static class SearchEndpoint
             CancellationToken ct) =>
         {
             var embedder = sp.GetService<EmbeddingService>();
-            var qdrant   = sp.GetService<QdrantService>();
-            return await HandleSearchAsync(req, db, embedder, qdrant, ct);
+            return await HandleSearchAsync(req, db, embedder, ct);
         });
     }
 
@@ -27,7 +26,6 @@ public static class SearchEndpoint
         GlossarySearchRequest req,
         GlossaryDbContext db,
         EmbeddingService? embedder,
-        QdrantService? qdrant,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.QueryText))
@@ -35,32 +33,32 @@ public static class SearchEndpoint
 
         List<GlossaryEntry> entries;
 
-        if (embedder is not null && qdrant is not null)
+        Guid? filterCategoryId = null;
+        if (!string.IsNullOrWhiteSpace(req.CategoryName))
         {
-            // Phase D: Qdrant 코사인 유사도 검색
-            var vector = await embedder.EmbedAsync(req.QueryText, ct);
-            var hitIds = await qdrant.SearchAsync(vector, req.TopK, req.CategoryName, ct);
+            var cat = await db.Categories.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Name == req.CategoryName, ct);
+            if (cat is not null) filterCategoryId = cat.Id;
+        }
 
-            // Qdrant 유사도 순서(내림차순) 유지
-            var orderMap = hitIds.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
-            entries = (await db.Entries.AsNoTracking()
-                .Where(e => hitIds.Contains(e.Id))
-                .ToListAsync(ct))
-                .OrderBy(e => orderMap.TryGetValue(e.Id, out var i) ? i : int.MaxValue)
-                .ToList();
+        if (embedder is not null && db.Database.IsNpgsql())
+        {
+            // pgvector 코사인 유사도 검색 (HNSW 인덱스)
+            var queryVector = await embedder.EmbedAsync(req.QueryText, ct);
+            var vectorParam = new Vector(queryVector);
+
+            FormattableString sql;
+            if (filterCategoryId.HasValue)
+                sql = $"SELECT * FROM glossary_entry WHERE status = 'published' AND category_id = {filterCategoryId.Value} AND embedding IS NOT NULL ORDER BY embedding <=> {vectorParam} LIMIT {req.TopK}";
+            else
+                sql = $"SELECT * FROM glossary_entry WHERE status = 'published' AND embedding IS NOT NULL ORDER BY embedding <=> {vectorParam} LIMIT {req.TopK}";
+
+            entries = await db.Entries.FromSqlInterpolated(sql).AsNoTracking().ToListAsync(ct);
         }
         else
         {
-            // MVP fallback: SQL LIKE
+            // Fallback: SQL LIKE 검색
             var pattern = $"%{req.QueryText.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_")}%";
-
-            Guid? filterCategoryId = null;
-            if (!string.IsNullOrWhiteSpace(req.CategoryName))
-            {
-                var cat = await db.Categories.AsNoTracking()
-                    .FirstOrDefaultAsync(c => c.Name == req.CategoryName, ct);
-                if (cat is not null) filterCategoryId = cat.Id;
-            }
 
             var query = db.Entries.AsNoTracking()
                 .Where(e => e.Status == "published")
@@ -75,7 +73,7 @@ public static class SearchEndpoint
             entries = await query.OrderBy(e => e.TermEn).Take(req.TopK).ToListAsync(ct);
         }
 
-        // CategoryId → CategoryName 조회 (공통)
+        // CategoryId → CategoryName 조회
         var categoryIds = entries
             .Where(e => e.CategoryId.HasValue)
             .Select(e => e.CategoryId!.Value)

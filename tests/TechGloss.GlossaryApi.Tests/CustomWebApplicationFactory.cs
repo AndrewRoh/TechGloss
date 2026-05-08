@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -11,44 +10,38 @@ namespace TechGloss.GlossaryApi.Tests;
 
 /// <summary>
 /// 테스트 전용 WebApplicationFactory.
-/// - 인메모리 SQLite를 사용하여 파일 기반 glossary.db 의존성 제거
+/// - EF Core InMemory + 전용 서비스 프로바이더로 PostgreSQL 의존성 제거
 /// - IClassFixture 인스턴스마다 고유한 DB 이름 → 테스트 클래스 간 격리 보장
-/// - seed.json 파일 경로 없이 코드에서 직접 시드 삽입
 /// </summary>
 public sealed class CustomWebApplicationFactory : WebApplicationFactory<Program>
 {
-    // 인메모리 SQLite는 마지막 연결이 닫히면 데이터가 사라지므로
-    // Factory 수명 동안 연결 하나를 살려둠
-    private readonly SqliteConnection _keepAlive;
     private readonly string _dbName = $"TechGlossTest_{Guid.NewGuid():N}";
 
-    public CustomWebApplicationFactory()
-    {
-        _keepAlive = new SqliteConnection($"Data Source={_dbName};Mode=Memory;Cache=Shared");
-        _keepAlive.Open();
-    }
+    // Npgsql과 InMemory가 동일한 DI 컨테이너에 공존하면 EF Core가 충돌을 감지한다.
+    // 전용 서비스 프로바이더를 사용해 InMemory 컨텍스트를 완전히 격리한다.
+    private static readonly IServiceProvider _inMemoryEfProvider =
+        new ServiceCollection()
+            .AddEntityFrameworkInMemoryDatabase()
+            .BuildServiceProvider(validateScopes: false);
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureServices(services =>
         {
-            // 기존 DbContext 옵션 제거 (파일 기반 SQLite)
+            // Npgsql DbContext 옵션 제거
             var descriptor = services.SingleOrDefault(
                 d => d.ServiceType == typeof(DbContextOptions<GlossaryDbContext>));
             if (descriptor != null) services.Remove(descriptor);
 
-            // 인메모리 SQLite로 교체 (_keepAlive와 동일한 캐시 공유 → 데이터 유지)
+            // InMemory DB로 교체 — 전용 서비스 프로바이더로 Npgsql 서비스와 충돌 방지
             services.AddDbContext<GlossaryDbContext>(opt =>
-                opt.UseSqlite($"Data Source={_dbName};Mode=Memory;Cache=Shared"));
+                opt.UseInMemoryDatabase(_dbName)
+                   .UseInternalServiceProvider(_inMemoryEfProvider));
         });
     }
 
     protected override IHost CreateHost(IHostBuilder builder)
     {
-        // base.CreateHost 내부에서 Program.cs 스타트업 코드 실행:
-        //   db.Database.EnsureCreated() → 테이블 생성 완료
-        //   SeedIfEmpty()              → seed.json 미발견 → 시드 없이 리턴
-        // 따라서 여기서 직접 시드 삽입
         var host = base.CreateHost(builder);
 
         using var scope = host.Services.CreateScope();
@@ -60,7 +53,7 @@ public sealed class CustomWebApplicationFactory : WebApplicationFactory<Program>
 
     private static void SeedTestData(GlossaryDbContext db)
     {
-        if (db.Entries.Any()) return; // 중복 방지
+        if (db.Entries.Any()) return;
 
         db.Entries.AddRange(
             Entry("11111111-0000-0000-0000-000000000001", "배포",       "deploy",
@@ -99,10 +92,4 @@ public sealed class CustomWebApplicationFactory : WebApplicationFactory<Program>
         CreatedAt         = DateTimeOffset.UtcNow,
         UpdatedAt         = DateTimeOffset.UtcNow
     };
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) _keepAlive.Dispose();
-        base.Dispose(disposing);
-    }
 }
