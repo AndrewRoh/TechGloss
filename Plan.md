@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** WPF exe 안에 WebView2(Chromium) 기반 현대 웹 UI를 올리고, 사내 고정 Ollama LLM(`gemma4:31b`)과 로컬 Glossary API 서버를 연동해 EN↔KO 양방향 IT 기술 번역 및 글자 단위 용어 LIKE 검색을 제공한다.
+**Goal:** WPF exe 안에 WebView2(Chromium) 기반 현대 웹 UI를 올리고, 사내 고정 Ollama LLM(`gemma4:e4b`)과 로컬 Glossary API 서버를 연동해 EN↔KO 양방향 IT 기술 번역 및 글자 단위 용어 LIKE 검색을 제공한다.
 
 **Architecture:** WPF 호스트가 WebView2를 통해 SPA를 표시하고, 모든 외부 HTTP(Ollama/Glossary API)는 .NET 호스트에서만 처리한다. Glossary API는 독립 프로세스로 기동하며 관계형 DB(정본) + 벡터 DB(RAG)를 소유한다. WPF는 벡터 DB에 직접 연결하지 않는다.
 
@@ -37,7 +37,7 @@
 
 1. **WPF ↔ 벡터 직접 연결 금지** — `TechGloss.Wpf`, `TechGloss.Infrastructure`에 `Qdrant.Client` 패키지 참조 불가; GlossaryApi 전용.
 2. **호스트 HTTP 전용** — Ollama·GlossaryApi 호출은 반드시 WPF 호스트 `HttpClient`; WebView 내 `fetch()` 직접 호출 금지.
-3. **LLM URL·모델 기본 고정** — `appsettings.json` 기본값 `172.20.64.76:11434` / `gemma4:31b`; 환경 오버레이(`appsettings.Production.json`)만 허용.
+3. **LLM URL·모델 기본 고정** — `appsettings.json` 기본값 `172.20.64.76:11434` / `gemma4:e4b`; 환경 오버레이(`appsettings.Production.json`)만 허용.
 4. **이중 검색 경계 유지** — 의미 유사도=`POST /glossary/search`(임베딩+벡터), 문자열=`GET /glossary/lookup`(SQL LIKE); 혼합 금지.
 5. **방향 명시 필수** — 모든 번역 요청에 `source_lang`/`target_lang` 포함; 자동 감지는 UI 보조만.
 
@@ -270,6 +270,31 @@ public sealed class GlossaryLookupRow
     public string DefinitionKo { get; init; } = "";    // 상세 설명 — 즉시 표시가 핵심 UX
     public string? CategoryName { get; init; }         // 한글 표시명; null이면 UI에서 생략
 }
+
+// ── ExtractTerms 관련 DTO ────────────────────────────────────────────────
+
+// POST /glossary/extract-terms 요청 페이로드
+// TranslationOrchestrator가 번역 완료 후 원문 + 번역 결과를 함께 전달
+public sealed class ExtractTermsRequest
+{
+    public required string SourceText { get; init; }       // 번역 원문 (EN 또는 KO)
+    public required string TranslatedText { get; init; }   // 번역 결과 (반대 언어)
+    public required string SourceLang { get; init; }       // "en" | "ko"
+    public required string TargetLang { get; init; }       // "en" | "ko"
+}
+
+// POST /glossary/extract-terms 응답 행
+// 추출된 용어 쌍 + 신규 여부(IsNew)를 담아 TranslationOrchestrator에 반환
+public sealed class ExtractedTermRow
+{
+    public Guid EntryId { get; init; }         // DB upsert된 GlossaryEntry.Id
+    public string TermEn { get; init; } = "";
+    public string TermKo { get; init; } = "";
+    public string CategorySlug { get; init; } = "General";  // 허용 목록 중 하나
+    // true: 이번 추출에서 처음 발견된 신규 용어 — UI에서 강조 표시 가능
+    // false: 기존 항목 TermKo 보완 등 업데이트
+    public bool IsNew { get; init; }
+}
 ```
 
 - [ ] **Step 6: 클라이언트 인터페이스 정의**
@@ -297,6 +322,11 @@ public interface IGlossaryClient
     // 번역 결과 확정 시 사용자가 승인 → upsert로 draft 생성, publish로 RAG 활성화
     Task UpsertAsync(GlossaryEntry entry, CancellationToken ct = default);
     Task PublishAsync(Guid entryId, CancellationToken ct = default);
+
+    // 번역 완료 후 원문+번역 결과를 Ollama로 분석 → IT 용어 쌍 자동 추출 + DB draft upsert
+    // 추출 실패(Ollama 미응답·파싱 오류)는 경고 로그만 — 번역 결과에 영향 없음
+    Task<IReadOnlyList<ExtractedTermRow>> ExtractTermsAsync(
+        ExtractTermsRequest request, CancellationToken ct = default);
 }
 ```
 
@@ -430,7 +460,7 @@ public sealed class TechGlossOptions
 public sealed class OllamaOptions
 {
     public string BaseUrl { get; set; } = "http://172.20.64.76:11434";  // Research §2.1 고정
-    public string Model { get; set; } = "gemma4:31b";                    // Research §2.1 고정
+    public string Model { get; set; } = "gemma4:e4b";                    // Research §2.1 고정
     public string EmbeddingModel { get; set; } = "nomic-embed-text";
     public string ChatPath { get; set; } = "/api/chat";                  // Research §4.1
     public bool UseOpenAiCompatiblePath { get; set; } = false;           // Research §13.5
@@ -577,7 +607,7 @@ public sealed class OllamaHttpClient : IOllamaChatClient
 
         req.Content = JsonContent.Create(new
         {
-            model = _opts.Model,   // appsettings 기본값 "gemma4:31b" — 요청마다 고정
+            model = _opts.Model,   // appsettings 기본값 "gemma4:e4b" — 요청마다 고정
             stream = true,         // false로 바꾸면 단일 JSON 응답으로 단순화 가능 (디버깅용)
             messages = new[]
             {
@@ -693,6 +723,27 @@ public sealed class GlossaryHttpClient : IGlossaryClient
         var result = await _http.PostAsJsonAsync(
             $"{_opts.BaseUrl}/glossary/publish", new { entry_id = entryId }, ct);
         result.EnsureSuccessStatusCode();
+    }
+
+    public async Task<IReadOnlyList<ExtractedTermRow>> ExtractTermsAsync(
+        ExtractTermsRequest request, CancellationToken ct = default)
+    {
+        // 추출 실패 시 빈 배열 반환 — 번역 결과에 영향 없도록 예외를 삼킴
+        // 호출자(TranslationOrchestrator)에서 try/catch 없이 안전하게 사용 가능
+        try
+        {
+            var result = await _http.PostAsJsonAsync(
+                $"{_opts.BaseUrl}/glossary/extract-terms", request, ct);
+            result.EnsureSuccessStatusCode();
+            return await result.Content.ReadFromJsonAsync<List<ExtractedTermRow>>(ct)
+                   ?? new List<ExtractedTermRow>();
+        }
+        catch (Exception)
+        {
+            // 네트워크 오류, 타임아웃, 파싱 실패 — 경고만 남기고 빈 배열 반환
+            // 로깅은 TranslationOrchestrator에서 처리 (GlossaryHttpClient는 ILogger 미주입)
+            return Array.Empty<ExtractedTermRow>();
+        }
     }
 }
 ```
@@ -883,16 +934,47 @@ CREATE VIRTUAL TABLE IF NOT EXISTS glossary_fts USING fts5(
     content_rowid='rowid'
 );
 
+-- Research §5.6.4 — KO 방향도 UNIQUE 보장: 동일 카테고리 내 동일 한글 용어 중복 방지
+-- EN 방향(uq_entry_en_cat)과 대칭 구조
+CREATE UNIQUE INDEX IF NOT EXISTS uq_entry_ko_cat
+    ON glossary_entry(term_ko_normalized, category_id);
+
 CREATE TABLE IF NOT EXISTS glossary_embedding_state (
-    entry_id            TEXT PRIMARY KEY REFERENCES glossary_entry(id),
+    -- ON DELETE CASCADE: entry 삭제 시 임베딩 상태도 자동 삭제 → 고아 레코드 방지
+    entry_id            TEXT PRIMARY KEY REFERENCES glossary_entry(id) ON DELETE CASCADE,
     embed_model         TEXT NOT NULL,
     embed_dimension     INTEGER NOT NULL,
     embed_text_hash     TEXT NOT NULL,
-    vector_store        TEXT NOT NULL DEFAULT 'sqlite_vec',
-    vector_point_id     TEXT NOT NULL,
+    -- Phase D 전까지는 'none'; Qdrant 도입 후 'qdrant'로 업데이트
+    -- 기존 'sqlite_vec' 기본값 제거 — MVP에서 sqlite_vec 패키지 미사용
+    vector_store        TEXT NOT NULL DEFAULT 'none',
+    vector_point_id     TEXT NOT NULL DEFAULT '',
     last_embedded_at    TEXT,
     last_error          TEXT
 );
+
+-- ── FTS5 동기화 트리거 ───────────────────────────────────────────────────
+-- content='glossary_entry' 모드는 트리거 없이는 FTS 인덱스가 갱신되지 않음
+-- INSERT/UPDATE/DELETE 세 트리거 모두 필수 — 누락 시 FTS 검색이 항상 빈 결과
+
+CREATE TRIGGER IF NOT EXISTS glossary_fts_insert
+AFTER INSERT ON glossary_entry BEGIN
+    INSERT INTO glossary_fts(rowid, id, term_ko, term_en, definition_ko)
+    VALUES (new.rowid, new.id, new.term_ko, new.term_en, new.definition_ko);
+END;
+
+-- FTS5는 UPDATE를 직접 지원하지 않으므로 DELETE + INSERT 패턴 사용
+CREATE TRIGGER IF NOT EXISTS glossary_fts_update
+AFTER UPDATE ON glossary_entry BEGIN
+    DELETE FROM glossary_fts WHERE rowid = old.rowid;
+    INSERT INTO glossary_fts(rowid, id, term_ko, term_en, definition_ko)
+    VALUES (new.rowid, new.id, new.term_ko, new.term_en, new.definition_ko);
+END;
+
+CREATE TRIGGER IF NOT EXISTS glossary_fts_delete
+AFTER DELETE ON glossary_entry BEGIN
+    DELETE FROM glossary_fts WHERE rowid = old.rowid;
+END;
 ```
 
 - [ ] **Step 4: EF Core DbContext 작성**
@@ -1220,7 +1302,7 @@ dotnet add src/TechGloss.Wpf package Microsoft.Extensions.Configuration.Json
   "TechGloss": {
     "Ollama": {
       "BaseUrl": "http://172.20.64.76:11434",
-      "Model": "gemma4:31b",
+      "Model": "gemma4:e4b",
       "EmbeddingModel": "nomic-embed-text",
       "ChatPath": "/api/chat",
       "UseOpenAiCompatiblePath": false,
@@ -2166,31 +2248,54 @@ public static class SearchEndpoint
 
             // LookupEndpoint와 동일한 이스케이프 로직 (향후 공통 헬퍼로 추출 가능)
             // '\' 먼저 이스케이프 → '%', '_' 순서 중요
-            var pattern = $"%{req.QueryText.Replace("%","\\%").Replace("_","\\_")}%";
+            var escaped = req.QueryText.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+            var pattern = $"%{escaped}%";
 
-            var rows = await db.Entries.AsNoTracking()
-                .Where(e => e.Status == "published")  // RAG 대상은 published만 (Research §5.5)
-                .Where(e =>
+            var query = db.Entries.AsNoTracking()
+                .Where(e => e.Status == "published");  // RAG 대상은 published만 (Research §5.5)
+
+            // CategoryName 필터: 동일 영문 용어가 카테고리마다 다른 대역을 가질 때 충돌 완화
+            // null이면 전 카테고리 검색 — TranslationOrchestrator가 category_name을 넘기지 않는 경우
+            if (!string.IsNullOrEmpty(req.CategoryName))
+            {
+                // 카테고리명으로 Id 먼저 조회 후 filter — EF Core가 서브쿼리로 최적화
+                var catId = await db.Categories.AsNoTracking()
+                    .Where(c => c.Name == req.CategoryName)
+                    .Select(c => (Guid?)c.Id)
+                    .FirstOrDefaultAsync(ct);
+                if (catId.HasValue)
+                    query = query.Where(e => e.CategoryId == catId);
+            }
+
+            query = query.Where(e =>
                     EF.Functions.Like(e.TermEn, pattern, "\\") ||
                     EF.Functions.Like(e.TermKo, pattern, "\\") ||
-                    EF.Functions.Like(e.DefinitionKo, pattern, "\\"))
+                    EF.Functions.Like(e.DefinitionKo, pattern, "\\"));
+
+            // 카테고리 JOIN: LEFT JOIN으로 CategoryName 함께 조회 (플레이스홀더 "" 제거)
+            // LookupEndpoint와 동일 패턴 — category_id가 null인 항목도 포함
+            var rows = await query
                 .OrderBy(e => e.TermEn)
                 .Take(req.TopK)  // TopK: 요청에서 지정된 상한 (기본 8)
+                .GroupJoin(db.Categories.AsNoTracking(),
+                    e => e.CategoryId, c => (Guid?)c.Id,
+                    (e, cats) => new { Entry = e, Cats = cats })
+                .SelectMany(x => x.Cats.DefaultIfEmpty(),
+                    (x, c) => new { x.Entry, CategoryName = c != null ? c.Name : (string?)null })
                 .ToListAsync(ct);
 
             // Research §4.3 — 방향에 맞게 source/target 정규화
             // 호출자(TranslationOrchestrator)는 Source/Target만 읽으면 됨 — 방향 로직 불필요
             // EN→KO: Source=TermEn, Target=TermKo / KO→EN: Source=TermKo, Target=TermEn
-            var result = rows.Select(e => new GlossarySearchRow
+            var result = rows.Select(r => new GlossarySearchRow
             {
-                EntryId      = e.Id,
-                TermEn       = e.TermEn,
-                TermKo       = e.TermKo,
-                DefinitionKo = e.DefinitionKo,
-                // CategoryId → Category 조인으로 Name 반환
-                CategoryName = /* categories dict lookup */ "",
-                Source       = req.SourceLang == "en" ? e.TermEn : e.TermKo,
-                Target       = req.TargetLang == "ko" ? e.TermKo : e.TermEn
+                EntryId      = r.Entry.Id,
+                TermEn       = r.Entry.TermEn,
+                TermKo       = r.Entry.TermKo,
+                DefinitionKo = r.Entry.DefinitionKo,
+                CategoryName = r.CategoryName ?? "",   // null → "" (프롬프트 표에 빈 셀로 표시)
+                Source       = req.SourceLang == "en" ? r.Entry.TermEn : r.Entry.TermKo,
+                Target       = req.TargetLang == "ko" ? r.Entry.TermKo : r.Entry.TermEn
             });
 
             return Results.Ok(result);
@@ -2387,7 +2492,7 @@ MicrosoftEdgeWebview2Setup.exe /silent /install
 ```bash
 curl -X POST http://172.20.64.76:11434/api/chat \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemma4:31b","messages":[{"role":"user","content":"hello"}],"stream":false}'
+  -d '{"model":"gemma4:e4b","messages":[{"role":"user","content":"hello"}],"stream":false}'
 ```
 
 ## 허용 호스트 목록 (SSRF 화이트리스트, Research §4.6)
@@ -2564,6 +2669,707 @@ git commit -m "feat: security hardening — q sanitization, log masking, SSRF gu
 
 ---
 
+## Task 11: 번역 자동 용어 추출 — ExtractTerms 엔드포인트
+
+> **CLAUDE.md 명시 기능**: 번역 완료 후 원문+결과를 Ollama로 분석해 IT 용어 쌍을 자동 추출·draft upsert하는 파이프라인. 추출 실패는 번역 결과에 영향 없음.
+
+**Files:**
+- Modify: `src/TechGloss.Core/Contracts/GlossaryDtos.cs` (Task 1에서 이미 DTO 추가됨)
+- Modify: `src/TechGloss.Infrastructure/Http/GlossaryHttpClient.cs` (Task 2에서 이미 구현됨)
+- Create: `src/TechGloss.GlossaryApi/Services/TermExtractionService.cs`
+- Create: `src/TechGloss.GlossaryApi/Endpoints/ExtractTermsEndpoint.cs`
+- Modify: `src/TechGloss.Wpf/Bridge/TranslationOrchestrator.cs` (번역 완료 후 추출 호출)
+- Test: `tests/TechGloss.GlossaryApi.Tests/ExtractTermsEndpointTests.cs`
+
+- [ ] **Step 1: TermExtractionService 구현**
+
+`src/TechGloss.GlossaryApi/Services/TermExtractionService.cs`:
+```csharp
+using System.Net.Http.Json;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using TechGloss.Core.Contracts;
+using TechGloss.Core.Models;
+using TechGloss.GlossaryApi.Data;
+
+namespace TechGloss.GlossaryApi.Services;
+
+// CLAUDE.md ExtractTerms 흐름 구현
+// Ollama로 IT 용어 쌍 추출 → GlossaryEntry draft upsert
+// 추출 실패(파싱 오류·Ollama 미응답)는 경고 로그만 남기고 빈 배열 반환
+public sealed class TermExtractionService
+{
+    private readonly HttpClient _http;
+    private readonly GlossaryDbContext _db;
+    private readonly ILogger<TermExtractionService> _logger;
+    private readonly string _baseUrl;
+    private readonly string _model;
+
+    // 카테고리 허용 목록 (CLAUDE.md 명시) — 대소문자 무관 매칭, 불일치 시 "General" 대체
+    private static readonly HashSet<string> AllowedCategories = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "General","Cloud","Frontend","Backend","Dotnet",
+        "Database","DevOps","Security","Network","AI","Mobile","Testing"
+    };
+
+    public TermExtractionService(
+        HttpClient http, GlossaryDbContext db,
+        ILogger<TermExtractionService> logger, IConfiguration config)
+    {
+        _http    = http;
+        _db      = db;
+        _logger  = logger;
+        _baseUrl = config["TechGloss:Ollama:BaseUrl"] ?? "http://172.20.64.76:11434";
+        _model   = config["TechGloss:Ollama:Model"]  ?? "gemma4:latest";
+    }
+
+    public async Task<List<ExtractedTermRow>> ExtractAsync(
+        ExtractTermsRequest req, CancellationToken ct)
+    {
+        // Ollama에게 JSON 배열 형식으로 용어 쌍 추출 요청 (stream: false — 단일 응답 필요)
+        var prompt = $"""
+            다음 EN/KO 텍스트 쌍에서 IT 기술 용어 쌍을 JSON 배열로 추출하세요.
+            출력 형식: [{{"term_en":"...","term_ko":"...","category":"...","definition_ko":"..."}}]
+            카테고리 허용값: General,Cloud,Frontend,Backend,Dotnet,Database,DevOps,Security,Network,AI,Mobile,Testing
+            번역되지 않은 코드 식별자·고유명사는 제외하세요.
+
+            [원문({req.SourceLang})]
+            {req.SourceText}
+
+            [번역({req.TargetLang})]
+            {req.TranslatedText}
+
+            JSON 배열만 출력 (마크다운 블록 없이):
+            """;
+
+        string rawJson;
+        try
+        {
+            var resp = await _http.PostAsJsonAsync(
+                $"{_baseUrl.TrimEnd('/')}/api/chat",
+                new
+                {
+                    model    = _model,
+                    stream   = false,
+                    messages = new[] { new { role = "user", content = prompt } }
+                }, ct);
+            resp.EnsureSuccessStatusCode();
+
+            using var doc = await JsonDocument.ParseAsync(
+                await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            // Ollama /api/chat non-stream 응답: { "message": { "content": "..." } }
+            rawJson = doc.RootElement
+                .GetProperty("message")
+                .GetProperty("content")
+                .GetString() ?? "[]";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ExtractTerms: Ollama 호출 실패 — 빈 배열 반환");
+            return new List<ExtractedTermRow>();
+        }
+
+        // LLM 출력에서 마크다운 코드 블록 제거 후 JSON 파싱
+        // 예: ```json\n[...]\n``` → [...]
+        var jsonText = rawJson.Trim();
+        if (jsonText.StartsWith("```")) {
+            var start = jsonText.IndexOf('\n') + 1;
+            var end   = jsonText.LastIndexOf("```");
+            jsonText  = end > start ? jsonText[start..end].Trim() : "[]";
+        }
+
+        List<RawTerm>? terms;
+        try
+        {
+            terms = JsonSerializer.Deserialize<List<RawTerm>>(jsonText,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ExtractTerms: JSON 파싱 실패 raw={Raw}", jsonText[..Math.Min(200, jsonText.Length)]);
+            return new List<ExtractedTermRow>();
+        }
+        if (terms is null or { Count: 0 }) return new List<ExtractedTermRow>();
+
+        var results = new List<ExtractedTermRow>();
+
+        foreach (var term in terms)
+        {
+            if (string.IsNullOrWhiteSpace(term.TermEn) || string.IsNullOrWhiteSpace(term.TermKo))
+                continue;
+
+            // 카테고리 허용 목록 검증 — 불일치 시 "General" 대체
+            var categoryName = AllowedCategories.Contains(term.Category ?? "")
+                ? term.Category! : "General";
+
+            // TermEnNormalized 기준 중복 확인 (CLAUDE.md 명시)
+            var enNorm = term.TermEn.Trim().ToLowerInvariant();
+            var existing = await _db.Entries.AsNoTracking()
+                .Where(e => e.TermEnNormalized == enNorm)
+                .FirstOrDefaultAsync(ct);
+
+            bool isNew;
+            Guid entryId;
+
+            if (existing is null)
+            {
+                // 신규: GlossaryEntry INSERT (status=draft)
+                var entry = new GlossaryEntry
+                {
+                    Id                = Guid.NewGuid(),
+                    TermEn            = term.TermEn.Trim(),
+                    TermKo            = term.TermKo.Trim(),
+                    TermEnNormalized  = enNorm,
+                    TermKoNormalized  = term.TermKo.Trim()
+                                             .Normalize(System.Text.NormalizationForm.FormKC)
+                                             .ToLowerInvariant(),
+                    DefinitionKo      = term.DefinitionKo ?? "",
+                    Status            = "draft",
+                    CreatedAt         = DateTimeOffset.UtcNow,
+                    UpdatedAt         = DateTimeOffset.UtcNow,
+                };
+                // CategoryId 조회 — 없으면 null (미분류)
+                var cat = await _db.Categories.AsNoTracking()
+                    .Where(c => c.Name == categoryName)
+                    .FirstOrDefaultAsync(ct);
+                entry.CategoryId = cat?.Id;
+
+                _db.Entries.Add(entry);
+                entryId = entry.Id;
+                isNew   = true;
+            }
+            else
+            {
+                // 기존: TermKo가 비어있을 때만 보완 (CLAUDE.md 규칙)
+                entryId = existing.Id;
+                isNew   = false;
+                if (string.IsNullOrWhiteSpace(existing.TermKo))
+                {
+                    await _db.Entries
+                        .Where(e => e.Id == existing.Id)
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(e => e.TermKo, term.TermKo.Trim())
+                            .SetProperty(e => e.UpdatedAt, DateTimeOffset.UtcNow), ct);
+                }
+            }
+
+            results.Add(new ExtractedTermRow
+            {
+                EntryId      = entryId,
+                TermEn       = term.TermEn.Trim(),
+                TermKo       = term.TermKo.Trim(),
+                CategorySlug = categoryName,
+                IsNew        = isNew,
+            });
+        }
+
+        await _db.SaveChangesAsync(ct);
+        return results;
+    }
+
+    // Ollama 응답 JSON 파싱용 내부 레코드 — camelCase 매핑
+    private sealed record RawTerm(
+        string? TermEn,
+        string? TermKo,
+        string? Category,
+        string? DefinitionKo);
+}
+```
+
+- [ ] **Step 2: ExtractTerms 엔드포인트 작성**
+
+`src/TechGloss.GlossaryApi/Endpoints/ExtractTermsEndpoint.cs`:
+```csharp
+using TechGloss.Core.Contracts;
+using TechGloss.GlossaryApi.Services;
+
+namespace TechGloss.GlossaryApi.Endpoints;
+
+public static class ExtractTermsEndpoint
+{
+    public static void MapExtractTerms(this WebApplication app)
+    {
+        // POST /glossary/extract-terms
+        // TranslationOrchestrator가 번역 완료 후 비동기 호출 — 결과를 번역 UI에 표시
+        // 추출 실패는 500 대신 빈 배열 + 200 반환 — 클라이언트가 예외 처리 불필요
+        app.MapPost("/glossary/extract-terms", async (
+            ExtractTermsRequest req,
+            TermExtractionService extractor,
+            CancellationToken ct) =>
+        {
+            var rows = await extractor.ExtractAsync(req, ct);
+            return Results.Ok(rows);
+        });
+    }
+}
+```
+
+- [ ] **Step 3: Program.cs에 엔드포인트 + 서비스 등록**
+
+`src/TechGloss.GlossaryApi/Program.cs`에 추가:
+```csharp
+// TermExtractionService: Scoped — DbContext와 수명 일치
+builder.Services.AddScoped<TermExtractionService>();
+// Ollama 호출용 HttpClient (타임아웃 60s — 추출은 단일 응답)
+builder.Services.AddHttpClient<TermExtractionService>(c =>
+    c.Timeout = TimeSpan.FromSeconds(60));
+
+// 엔드포인트 등록 (app.Build() 이후)
+app.MapExtractTerms();
+```
+
+- [ ] **Step 4: TranslationOrchestrator에 추출 호출 추가**
+
+`src/TechGloss.Wpf/Bridge/TranslationOrchestrator.cs` `RunStreamingAsync` 내부,
+`replyToWeb(... "translation.done" ...)` 직전에 추가:
+```csharp
+// 번역 완료 후 용어 자동 추출 (fire-and-forget 아님 — 결과를 SPA에 전달)
+// 실패 시 빈 배열 반환 보장 (GlossaryHttpClient.ExtractTermsAsync 내부 try/catch)
+try
+{
+    var extractedTerms = await _glossary.ExtractTermsAsync(new ExtractTermsRequest
+    {
+        SourceText     = text,
+        TranslatedText = translatedBuilder.ToString(), // 스트림 누적 버퍼
+        SourceLang     = sourceLang,
+        TargetLang     = targetLang,
+    }, ct);
+
+    if (extractedTerms.Count > 0)
+    {
+        // "terms.extracted": LookupPane 또는 별도 알림 UI에서 신규 draft 용어 표시
+        replyToWeb(JsonSerializer.Serialize(
+            new { type = "terms.extracted", payload = extractedTerms }));
+    }
+}
+catch (Exception ex)
+{
+    _logger.LogWarning(ex, "ExtractTerms 호출 실패 — 번역 결과는 정상");
+}
+```
+
+> **주의**: 스트리밍 청크를 `StringBuilder translatedBuilder`에 누적하도록
+> `RunStreamingAsync` 루프를 수정해야 합니다:
+> ```csharp
+> var translatedBuilder = new StringBuilder();
+> await foreach (var chunk in _llm.StreamChatAsync(systemPrompt, text, ct))
+> {
+>     translatedBuilder.Append(chunk);
+>     replyToWeb(JsonSerializer.Serialize(
+>         new { type = "translation.chunk", payload = chunk }));
+> }
+> ```
+
+- [ ] **Step 5: ExtractTerms 통합 테스트 작성**
+
+`tests/TechGloss.GlossaryApi.Tests/ExtractTermsEndpointTests.cs`:
+```csharp
+using Microsoft.AspNetCore.Mvc.Testing;
+using System.Net.Http.Json;
+using TechGloss.Core.Contracts;
+
+namespace TechGloss.GlossaryApi.Tests;
+
+public class ExtractTermsEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+    public ExtractTermsEndpointTests(WebApplicationFactory<Program> f)
+        => _client = f.CreateClient();
+
+    [Fact]
+    public async Task ExtractTerms_EmptyTexts_ReturnsEmptyArray()
+    {
+        // Ollama 미연결 환경에서도 빈 배열 + 200 반환 보장
+        var req = new ExtractTermsRequest
+        {
+            SourceText     = "",
+            TranslatedText = "",
+            SourceLang     = "en",
+            TargetLang     = "ko",
+        };
+        var resp = await _client.PostAsJsonAsync("/glossary/extract-terms", req);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var rows = await resp.Content.ReadFromJsonAsync<List<ExtractedTermRow>>();
+        Assert.NotNull(rows);
+        // Ollama 미연결이므로 빈 배열 기대 (추출 실패 graceful)
+        Assert.Empty(rows!);
+    }
+
+    [Fact]
+    public async Task ExtractTerms_ReturnsOk_WhenOllamaUnavailable()
+    {
+        // 핵심: Ollama 장애가 번역 파이프라인 전체를 중단시키지 않아야 함
+        var req = new ExtractTermsRequest
+        {
+            SourceText     = "Deploy the container to Kubernetes cluster.",
+            TranslatedText = "컨테이너를 쿠버네티스 클러스터에 배포합니다.",
+            SourceLang     = "en",
+            TargetLang     = "ko",
+        };
+        var resp = await _client.PostAsJsonAsync("/glossary/extract-terms", req);
+        // 200이면 성공 — 실제 추출 여부는 Ollama 연결 상태에 따라 다름
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+}
+```
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add src/TechGloss.GlossaryApi tests/TechGloss.GlossaryApi.Tests src/TechGloss.Wpf
+git commit -m "feat: add ExtractTerms endpoint, TermExtractionService, and Orchestrator integration"
+```
+
+---
+
+## Task 12: Phase D — Qdrant 벡터 RAG 완전 구현
+
+> **MVP → 실제 RAG 전환**: EmbeddingService를 실제 파이프라인에 연결하고, `/glossary/publish` 시 Qdrant 벡터 인덱스 등록, `/glossary/search`를 코사인 유사도 검색으로 교체.
+
+**Files:**
+- Create: `docker-compose.yml` (Qdrant)
+- Create: `src/TechGloss.GlossaryApi/Services/QdrantService.cs`
+- Modify: `src/TechGloss.GlossaryApi/Endpoints/UpsertEndpoint.cs` (publish 시 벡터 upsert)
+- Modify: `src/TechGloss.GlossaryApi/Endpoints/SearchEndpoint.cs` (Qdrant 코사인 유사도로 교체)
+- Create: `src/TechGloss.GlossaryApi/Scripts/reembed_all.sh` (기존 데이터 일괄 임베딩 배치)
+- Modify: `src/TechGloss.GlossaryApi/Program.cs` (Qdrant 설정 추가)
+
+- [ ] **Step 1: Docker Compose로 Qdrant 기동**
+
+`docker-compose.yml`:
+```yaml
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+```
+
+```bash
+docker compose up -d qdrant
+# 확인: curl http://localhost:6333/healthz → {"title":"qdrant - version ..."}
+```
+
+Qdrant 설정을 `appsettings.json`에 추가:
+```json
+"Qdrant": {
+  "Endpoint": "http://localhost:6333",
+  "CollectionName": "glossary",
+  "VectorSize": 768,
+  "Distance": "Cosine"
+}
+```
+
+- [ ] **Step 2: QdrantService 구현 (REST API 직접 호출)**
+
+`src/TechGloss.GlossaryApi/Services/QdrantService.cs`:
+```csharp
+using System.Net.Http.Json;
+using System.Text.Json;
+
+namespace TechGloss.GlossaryApi.Services;
+
+// Qdrant REST API 래퍼 — Qdrant.Client NuGet은 WPF/Infrastructure에서 금지이므로
+// GlossaryApi 내부에서만 사용. HttpClient 직접 호출로 의존성 최소화.
+public sealed class QdrantService
+{
+    private readonly HttpClient _http;
+    private readonly string _endpoint;
+    private readonly string _collection;
+    private readonly int _vectorSize;
+
+    public QdrantService(HttpClient http, IConfiguration config)
+    {
+        _http       = http;
+        _endpoint   = config["Qdrant:Endpoint"]        ?? "http://localhost:6333";
+        _collection = config["Qdrant:CollectionName"]  ?? "glossary";
+        _vectorSize = config.GetValue<int>("Qdrant:VectorSize", 768);
+    }
+
+    // 컬렉션 생성 (없을 때만) — Program.cs 기동 시 호출
+    public async Task EnsureCollectionAsync(CancellationToken ct = default)
+    {
+        var checkResp = await _http.GetAsync(
+            $"{_endpoint}/collections/{_collection}", ct);
+        if (checkResp.IsSuccessStatusCode) return;  // 이미 존재
+
+        var createResp = await _http.PutAsJsonAsync(
+            $"{_endpoint}/collections/{_collection}",
+            new
+            {
+                vectors = new
+                {
+                    size     = _vectorSize,
+                    distance = "Cosine"
+                }
+            }, ct);
+        createResp.EnsureSuccessStatusCode();
+    }
+
+    // 단건 벡터 upsert — publish 시 호출
+    // pointId: GlossaryEntry.Id (Guid) — SQL ↔ 벡터 동기화 단순화
+    public async Task UpsertPointAsync(
+        Guid pointId, float[] vector,
+        string termEn, string termKo, string categoryName,
+        CancellationToken ct = default)
+    {
+        var resp = await _http.PutAsJsonAsync(
+            $"{_endpoint}/collections/{_collection}/points",
+            new
+            {
+                points = new[]
+                {
+                    new
+                    {
+                        id      = pointId.ToString(),   // Qdrant UUID string point id
+                        vector  = vector,
+                        payload = new { term_en = termEn, term_ko = termKo, category = categoryName }
+                    }
+                }
+            }, ct);
+        resp.EnsureSuccessStatusCode();
+    }
+
+    // 코사인 유사도 TopK 검색 — SearchEndpoint Phase D에서 호출
+    public async Task<List<Guid>> SearchAsync(
+        float[] queryVector, int topK, string? categoryFilter = null,
+        CancellationToken ct = default)
+    {
+        // 카테고리 필터: Qdrant payload filter 사용
+        object? filter = categoryFilter is not null
+            ? new { must = new[] { new { key = "category", match = new { value = categoryFilter } } } }
+            : null;
+
+        var body = new Dictionary<string, object?>
+        {
+            ["vector"]      = queryVector,
+            ["limit"]       = topK,
+            ["with_payload"] = false,
+        };
+        if (filter is not null) body["filter"] = filter;
+
+        var resp = await _http.PostAsJsonAsync(
+            $"{_endpoint}/collections/{_collection}/points/search", body, ct);
+        resp.EnsureSuccessStatusCode();
+
+        using var doc = await JsonDocument.ParseAsync(
+            await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+
+        // 응답: { "result": [ { "id": "uuid", "score": 0.9 }, ... ] }
+        return doc.RootElement.GetProperty("result")
+            .EnumerateArray()
+            .Select(e => Guid.Parse(e.GetProperty("id").GetString()!))
+            .ToList();
+    }
+}
+```
+
+- [ ] **Step 3: publish 엔드포인트에 임베딩 + Qdrant upsert 추가**
+
+`src/TechGloss.GlossaryApi/Endpoints/UpsertEndpoint.cs`의 publish 핸들러 수정:
+```csharp
+app.MapPost("/glossary/publish", async (
+    PublishRequest req, GlossaryDbContext db,
+    EmbeddingService embedder, QdrantService qdrant,
+    CancellationToken ct) =>
+{
+    var entry = await db.Entries
+        .Include(e => e.Category)   // CategoryName 접근을 위해 Include
+        .FirstOrDefaultAsync(e => e.Id == req.EntryId, ct);
+    if (entry is null) return Results.NotFound();
+
+    // 1. DB 상태 published로 전환
+    entry.Status    = "published";
+    entry.UpdatedAt = DateTimeOffset.UtcNow;
+
+    // 2. 임베딩 생성 (Phase D: Ollama /api/embeddings)
+    var embedText = EmbeddingService.BuildEmbedText(
+        entry.Category?.Name ?? "General",
+        entry.TermEn, entry.TermKo, entry.DefinitionKo);
+    var vector = await embedder.EmbedAsync(embedText, ct);
+
+    // 3. Qdrant 벡터 upsert (GlossaryEntry.Id = Qdrant point id)
+    await qdrant.UpsertPointAsync(
+        entry.Id, vector,
+        entry.TermEn, entry.TermKo,
+        entry.Category?.Name ?? "General", ct);
+
+    // 4. embedding_state 기록 — 재임베딩 필요 여부 추적
+    var state = await db.Set<GlossaryEmbeddingState>()
+        .FindAsync(new object[] { entry.Id }, ct);
+    var hash = Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(embedText)))[..16];
+
+    if (state is null)
+        db.Set<GlossaryEmbeddingState>().Add(new GlossaryEmbeddingState
+        {
+            EntryId        = entry.Id,
+            EmbedModel     = "nomic-embed-text",
+            EmbedDimension = vector.Length,
+            EmbedTextHash  = hash,
+            VectorStore    = "qdrant",
+            VectorPointId  = entry.Id.ToString(),
+            LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O"),
+        });
+    else
+    {
+        state.EmbedTextHash  = hash;
+        state.VectorStore    = "qdrant";
+        state.LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O");
+        state.LastError      = null;
+    }
+
+    await db.SaveChangesAsync(ct);
+    return Results.Ok();
+});
+```
+
+`GlossaryEmbeddingState` EF Core 엔티티를 `GlossaryDbContext`에 추가:
+```csharp
+public DbSet<GlossaryEmbeddingState> EmbeddingStates => Set<GlossaryEmbeddingState>();
+
+// OnModelCreating 내부
+m.Entity<GlossaryEmbeddingState>(e =>
+{
+    e.ToTable("glossary_embedding_state");
+    e.HasKey(x => x.EntryId);
+    e.Property(x => x.EntryId).HasConversion<string>();
+});
+```
+
+- [ ] **Step 4: SearchEndpoint를 Qdrant 코사인 유사도로 교체**
+
+`src/TechGloss.GlossaryApi/Endpoints/SearchEndpoint.cs` Phase D 버전:
+```csharp
+app.MapPost("/glossary/search", async (
+    GlossarySearchRequest req,
+    GlossaryDbContext db,
+    EmbeddingService embedder,
+    QdrantService qdrant,
+    CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.QueryText))
+        return Results.Ok(Array.Empty<GlossarySearchRow>());
+
+    // 1. 쿼리 텍스트 임베딩
+    var queryVector = await embedder.EmbedAsync(req.QueryText, ct);
+
+    // 2. Qdrant 코사인 유사도 검색 → point id(Guid) 목록
+    var pointIds = await qdrant.SearchAsync(
+        queryVector, req.TopK, req.CategoryName, ct);
+
+    if (pointIds.Count == 0) return Results.Ok(Array.Empty<GlossarySearchRow>());
+
+    // 3. SQL에서 상세 정보 재조회 (Qdrant payload 최소화 전략)
+    var entries = await db.Entries.AsNoTracking()
+        .Where(e => pointIds.Contains(e.Id) && e.Status == "published")
+        .GroupJoin(db.Categories.AsNoTracking(),
+            e => e.CategoryId, c => (Guid?)c.Id,
+            (e, cats) => new { Entry = e, Cats = cats })
+        .SelectMany(x => x.Cats.DefaultIfEmpty(),
+            (x, c) => new { x.Entry, CategoryName = c != null ? c.Name : (string?)null })
+        .ToListAsync(ct);
+
+    // Qdrant 점수 순서(유사도 내림차순) 복원
+    var ordered = pointIds
+        .Select(id => entries.FirstOrDefault(r => r.Entry.Id == id))
+        .Where(r => r is not null)
+        .Select(r => new GlossarySearchRow
+        {
+            EntryId      = r!.Entry.Id,
+            TermEn       = r.Entry.TermEn,
+            TermKo       = r.Entry.TermKo,
+            DefinitionKo = r.Entry.DefinitionKo,
+            CategoryName = r.CategoryName ?? "",
+            Source       = req.SourceLang == "en" ? r.Entry.TermEn : r.Entry.TermKo,
+            Target       = req.TargetLang == "ko" ? r.Entry.TermKo : r.Entry.TermEn,
+        });
+
+    return Results.Ok(ordered);
+});
+```
+
+- [ ] **Step 5: 기존 published 용어 일괄 임베딩 배치 스크립트**
+
+`src/TechGloss.GlossaryApi/Scripts/reembed_all.sh`:
+```bash
+#!/bin/bash
+# Phase D 전환 시 기존 published 용어를 모두 임베딩해 Qdrant에 적재
+# 실행 전 GlossaryApi와 Qdrant가 기동 중이어야 함
+
+BASE_URL="${GLOSSARY_API:-http://127.0.0.1:5088}"
+
+echo "=== 기존 published 용어 일괄 임베딩 시작 ==="
+
+# 1. 현재 published 용어 목록 조회
+entries=$(curl -s "$BASE_URL/glossary/lookup?q=&lang=auto&limit=1000" | \
+          python3 -c "import sys,json; data=json.load(sys.stdin); \
+          [print(e['id']) for e in data]")
+
+if [ -z "$entries" ]; then
+    echo "published 용어 없음 — 시드 데이터를 먼저 publish 하세요"
+    exit 0
+fi
+
+count=0
+while IFS= read -r entry_id; do
+    [ -z "$entry_id" ] && continue
+    # publish 엔드포인트를 재호출해 임베딩 + Qdrant upsert 트리거
+    result=$(curl -s -X POST "$BASE_URL/glossary/publish" \
+             -H "Content-Type: application/json" \
+             -d "{\"EntryId\":\"$entry_id\"}")
+    echo "[$((++count))] $entry_id → $result"
+    sleep 0.1  # Ollama 과부하 방지
+done <<< "$entries"
+
+echo "=== 완료: $count 건 임베딩 ==="
+```
+
+```bash
+chmod +x src/TechGloss.GlossaryApi/Scripts/reembed_all.sh
+# Phase D 전환 후 1회 실행
+./src/TechGloss.GlossaryApi/Scripts/reembed_all.sh
+```
+
+- [ ] **Step 6: Program.cs에 QdrantService 등록 및 컬렉션 초기화**
+
+```csharp
+// QdrantService: Singleton — 컬렉션 생성은 기동 시 1회
+builder.Services.AddHttpClient<QdrantService>();
+builder.Services.AddSingleton<QdrantService>();
+builder.Services.AddSingleton<EmbeddingService>();
+builder.Services.AddHttpClient<EmbeddingService>(c =>
+    c.Timeout = TimeSpan.FromSeconds(60));
+
+// 앱 기동 시 Qdrant 컬렉션 보장
+using (var scope = app.Services.CreateScope())
+{
+    var qdrant = scope.ServiceProvider.GetRequiredService<QdrantService>();
+    try { await qdrant.EnsureCollectionAsync(); }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "Qdrant 연결 실패 — MVP 모드(SQL LIKE)로 폴백");
+    }
+}
+```
+
+- [ ] **Step 7: 커밋**
+
+```bash
+git add docker-compose.yml src/TechGloss.GlossaryApi
+git commit -m "feat: Phase D — Qdrant vector RAG, publish embedding trigger, bulk reembed script"
+```
+
+---
+
 ## 자체 검토 (spec coverage)
 
 | Research 요구사항 | Plan2 위치 | 구현 여부 |
@@ -2571,7 +3377,7 @@ git commit -m "feat: security hardening — q sanitization, log masking, SSRF gu
 | WPF exe | Task 4 | ✅ |
 | WebView2 가상 호스트 `https://app.local/` | Task 4 Step 5 | ✅ |
 | `file://` 금지 | Task 4 Step 5 | ✅ |
-| LLM 고정 `172.20.64.76:11434 / gemma4:31b` | Task 2 Step 2, Task 6 | ✅ |
+| LLM 고정 `172.20.64.76:11434 / gemma4:e4b` | Task 2 Step 2, Task 6 | ✅ |
 | NDJSON 스트리밍 | Task 2 Step 6 | ✅ |
 | EN↔KO 양방향 + `source_lang/target_lang` | Task 6, Task 5 Step 4 | ✅ |
 | Glossary API HTTP만 (직접 벡터 연결 금지) | Task 2 Step 7, Task 1 | ✅ |
@@ -2589,4 +3395,16 @@ git commit -m "feat: security hardening — q sanitization, log masking, SSRF gu
 | DEPLOY.md (기동 순서·헬스) | Task 8 Step 4 | ✅ |
 | WebView2 DevTools 개발 모드 | Task 4 Step 5 | ✅ |
 | 작성자·승인자 컬럼 없음 | Task 3 Step 3, Task 3 Step 4 | ✅ |
-| Qdrant (Phase D) | 트레이드오프 T3에 문서화; MVP는 SQLite | ✅(문서화) |
+| FTS5 동기화 트리거 (INSERT/UPDATE/DELETE) | Task 3 Step 3 | ✅ |
+| term_ko_normalized UNIQUE 인덱스 | Task 3 Step 3 | ✅ |
+| embedding_state ON DELETE CASCADE | Task 3 Step 3 | ✅ |
+| vector_store 기본값 'none' (MVP 명시) | Task 3 Step 3 | ✅ |
+| SearchEndpoint CategoryName JOIN | Task 7 Step 3 | ✅ |
+| SearchEndpoint CategoryName 필터 | Task 7 Step 3 | ✅ |
+| ExtractTermsAsync (CLAUDE.md 명시) | Task 1, Task 2, Task 11 | ✅ |
+| TermExtractionService + 엔드포인트 | Task 11 | ✅ |
+| 번역 완료 후 용어 자동 추출 | Task 11 Step 4 | ✅ |
+| Qdrant 컬렉션 설정 + 벡터 upsert | Task 12 Step 2~3 | ✅ |
+| publish 시 임베딩 트리거 | Task 12 Step 3 | ✅ |
+| Qdrant 코사인 유사도 검색 전환 | Task 12 Step 4 | ✅ |
+| 기존 데이터 일괄 임베딩 배치 | Task 12 Step 5 | ✅ |

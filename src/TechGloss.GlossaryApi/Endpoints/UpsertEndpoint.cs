@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using TechGloss.Core.Models;
 using TechGloss.GlossaryApi.Data;
+using TechGloss.GlossaryApi.Models;
 using TechGloss.GlossaryApi.Services;
 
 namespace TechGloss.GlossaryApi.Endpoints;
@@ -93,7 +94,37 @@ public static class UpsertEndpoint
                 categoryName, entry.TermEn, entry.TermKo, entry.DefinitionKo);
             var vector = await embedder.EmbedAsync(embedText, ct);
 
-            await qdrant.UpsertAsync(entry.Id, vector, entry.TermEn, entry.TermKo, categoryName, ct);
+            await qdrant.UpsertPointAsync(
+                entry.Id, vector,
+                entry.TermEn, entry.TermKo, categoryName, ct);
+
+            // embedding_state 기록 — 재임베딩 필요 여부 추적
+            var hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(embedText)))[..16];
+
+            var state = await db.EmbeddingStates.FindAsync(new object[] { entry.Id }, ct);
+            if (state is null)
+            {
+                db.EmbeddingStates.Add(new GlossaryEmbeddingState
+                {
+                    EntryId        = entry.Id,
+                    EmbedModel     = "nomic-embed-text",
+                    EmbedDimension = vector.Length,
+                    EmbedTextHash  = hash,
+                    VectorStore    = "qdrant",
+                    VectorPointId  = entry.Id.ToString(),
+                    LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O"),
+                });
+            }
+            else
+            {
+                state.EmbedTextHash  = hash;
+                state.VectorStore    = "qdrant";
+                state.LastEmbeddedAt = DateTimeOffset.UtcNow.ToString("O");
+                state.LastError      = null;
+            }
+            await db.SaveChangesAsync(ct);
         }
         catch (Exception ex)
         {

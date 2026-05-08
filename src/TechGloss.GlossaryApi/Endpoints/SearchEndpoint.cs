@@ -39,7 +39,7 @@ public static class SearchEndpoint
         {
             // Phase D: Qdrant 코사인 유사도 검색
             var vector = await embedder.EmbedAsync(req.QueryText, ct);
-            var hitIds = await qdrant.SearchAsync(vector, (uint)req.TopK, req.CategoryName, ct);
+            var hitIds = await qdrant.SearchAsync(vector, req.TopK, req.CategoryName, ct);
 
             // Qdrant 유사도 순서(내림차순) 유지
             var orderMap = hitIds.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
