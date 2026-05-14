@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Pgvector;
 using TechGloss.Core.Models;
 
@@ -26,13 +27,19 @@ public sealed class GlossaryDbContext : DbContext
 
             if (isNpgsql)
             {
-                // pgvector: float[]? ↔ Pgvector.Vector (768차원 코사인 유사도 검색)
+                // UseVector()로 등록된 Npgsql 타입 매핑이 Vector → vector(768) 저장을 처리
+                var comparer = new ValueComparer<float[]?>(
+                    (a, b) => a == null ? b == null : b != null && a.SequenceEqual(b),
+                    v => v == null ? 0 : v.Aggregate(0, HashCode.Combine),
+                    v => v == null ? null : v.ToArray());
+
                 e.Property(x => x.Embedding)
                     .HasColumnType("vector(768)")
                     .IsRequired(false)
                     .HasConversion(
                         v => v == null ? null : new Vector(v),
-                        v => v == null ? null : v.ToArray());
+                        v => v == null ? null : v.ToArray())
+                    .Metadata.SetValueComparer(comparer);
             }
             else
             {
@@ -49,7 +56,7 @@ public sealed class GlossaryDbContext : DbContext
         {
             c.ToTable("glossary_category");
             c.HasKey(x => x.Id);
-            c.HasIndex(x => x.Name).IsUnique();
+            c.HasIndex(x => x.NameEnNormalized).IsUnique();
         });
     }
 }

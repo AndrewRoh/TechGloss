@@ -34,7 +34,7 @@ public static class ServiceCollectionExtensions
         services
             .AddHttpClient<IGlossaryClient, GlossaryHttpClient>(c =>
             {
-                c.Timeout = TimeSpan.FromSeconds(30);
+                c.Timeout = TimeSpan.FromSeconds(opts.GlossaryApi.TimeoutSeconds);
             })
             .AddHttpMessageHandler(() => new AllowedHostsHandler(allowedHosts));
 

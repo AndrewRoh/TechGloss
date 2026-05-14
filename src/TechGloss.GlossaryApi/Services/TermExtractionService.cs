@@ -17,11 +17,6 @@ public sealed class TermExtractionService
     private readonly string _baseUrl;
     private readonly string _model;
 
-    private static readonly HashSet<string> AllowedCategories = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "General", "Cloud", "Frontend", "Backend", "Dotnet",
-        "Database", "DevOps", "Security", "Network", "AI", "Mobile", "Testing"
-    };
 
     public TermExtractionService(
         HttpClient http,
@@ -45,14 +40,24 @@ public sealed class TermExtractionService
             string.IsNullOrWhiteSpace(req.TranslatedText))
             return new List<ExtractedTermRow>();
 
+        // var prompt =
+        //     "다음 EN/KO 텍스트 쌍에서 IT 기술 용어 쌍을 JSON 배열로 추출하세요.\n" +
+        //     "출력 형식: [{\"term_en\":\"...\",\"term_ko\":\"...\",\"category\":\"...\",\"definition_ko\":\"...\"}]\n" +
+        //     "카테고리 허용값: General,Cloud,Frontend,Backend,Dotnet,Database,DevOps,Security,Network,AI,Mobile,Testing\n" +
+        //     "번역되지 않은 코드 식별자·고유명사는 제외하세요.\n\n" +
+        //     $"[원문({req.SourceLang})]\n{req.SourceText}\n\n" +
+        //     $"[번역({req.TargetLang})]\n{req.TranslatedText}\n\n" +
+        //     "JSON 배열만 출력 (마크다운 블록 없이):";
         var prompt =
-            "다음 EN/KO 텍스트 쌍에서 IT 기술 용어 쌍을 JSON 배열로 추출하세요.\n" +
-            "출력 형식: [{\"term_en\":\"...\",\"term_ko\":\"...\",\"category\":\"...\",\"definition_ko\":\"...\"}]\n" +
-            "카테고리 허용값: General,Cloud,Frontend,Backend,Dotnet,Database,DevOps,Security,Network,AI,Mobile,Testing\n" +
-            "번역되지 않은 코드 식별자·고유명사는 제외하세요.\n\n" +
-            $"[원문({req.SourceLang})]\n{req.SourceText}\n\n" +
-            $"[번역({req.TargetLang})]\n{req.TranslatedText}\n\n" +
-            "JSON 배열만 출력 (마크다운 블록 없이):";
+            "Your response MUST be a raw JSON array and nothing else — no explanation, no markdown, no headers.\n" +
+            "Extract every word or phrase that appears translated between the two texts below.\n" +
+            "Include simple common words (e.g. Italian→이탈리아, game→게임, originally→원래, owned→소유).\n" +
+            "Exclude untranslated proper nouns (person names, product names left as-is).\n" +
+            "JSON format (output the array only, starting with [ and ending with ]):\n" +
+            "[{\"term_en\":\"...\",\"term_ko\":\"...\",\"category\":\"...\",\"definition_ko\":\"...\"}]\n\n" +
+            $"[Source({req.SourceLang})]\n{req.SourceText}\n\n" +
+            $"[Translation({req.TargetLang})]\n{req.TranslatedText}\n\n" +
+            "[";
 
         string rawJson;
         try
@@ -81,11 +86,23 @@ public sealed class TermExtractionService
         }
 
         var jsonText = rawJson.Trim();
+
+        // 마크다운 코드 블록 제거
         if (jsonText.StartsWith("```"))
         {
             var start = jsonText.IndexOf('\n') + 1;
             var end   = jsonText.LastIndexOf("```");
             jsonText  = end > start ? jsonText[start..end].Trim() : "[]";
+        }
+
+        // LLM이 설명문과 함께 반환했을 때 JSON 배열 부분만 추출
+        if (!jsonText.StartsWith("["))
+        {
+            var arrayStart = jsonText.IndexOf('[');
+            var arrayEnd   = jsonText.LastIndexOf(']');
+            jsonText = arrayStart >= 0 && arrayEnd > arrayStart
+                ? jsonText[arrayStart..(arrayEnd + 1)]
+                : "[]";
         }
 
         List<RawTerm>? terms;
@@ -103,16 +120,16 @@ public sealed class TermExtractionService
 
         if (terms is null or { Count: 0 }) return new List<ExtractedTermRow>();
 
-        var results    = new List<ExtractedTermRow>();
-        var newEntries = new List<(GlossaryEntry entry, string categoryName)>();
+        var results       = new List<ExtractedTermRow>();
+        var newEntries    = new List<(GlossaryEntry entry, string categoryName)>();
+        var categoryCache = new Dictionary<string, Guid?>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var term in terms)
         {
             if (string.IsNullOrWhiteSpace(term.TermEn) || string.IsNullOrWhiteSpace(term.TermKo))
                 continue;
 
-            var categoryName = AllowedCategories.Contains(term.Category ?? "")
-                ? term.Category! : "General";
+            var categoryName = string.IsNullOrWhiteSpace(term.Category) ? "General" : term.Category!.Trim();
 
             var enNorm   = term.TermEn.Trim().ToLowerInvariant();
             var existing = await _db.Entries.AsNoTracking()
@@ -124,9 +141,26 @@ public sealed class TermExtractionService
 
             if (existing is null)
             {
-                var cat = await _db.Categories.AsNoTracking()
-                    .Where(c => c.Name == categoryName)
-                    .FirstOrDefaultAsync(ct);
+                if (!categoryCache.TryGetValue(categoryName, out var categoryId))
+                {
+                    var norm = NormalizeCategory(categoryName);
+                    var cat  = await _db.Categories
+                        .FirstOrDefaultAsync(c => c.NameEnNormalized == norm, ct);
+                    if (cat is null)
+                    {
+                        cat = new TechGloss.Core.Models.GlossaryCategory
+                        {
+                            Id               = Guid.NewGuid(),
+                            Name             = categoryName,
+                            NameEnNormalized = norm,
+                        };
+                        _db.Categories.Add(cat);
+                        await _db.SaveChangesAsync(ct);
+                        _logger.LogInformation("새 카테고리 생성: {Category}", categoryName);
+                    }
+                    categoryId = cat.Id;
+                    categoryCache[categoryName] = categoryId;
+                }
 
                 entry = new GlossaryEntry
                 {
@@ -138,7 +172,7 @@ public sealed class TermExtractionService
                                            .Normalize(System.Text.NormalizationForm.FormKC)
                                            .ToLowerInvariant(),
                     DefinitionKo     = term.DefinitionKo ?? "",
-                    CategoryId       = cat?.Id,
+                    CategoryId       = categoryCache[categoryName],
                     Status           = "published",
                     CreatedAt        = DateTimeOffset.UtcNow,
                     UpdatedAt        = DateTimeOffset.UtcNow,
@@ -195,9 +229,12 @@ public sealed class TermExtractionService
         return results;
     }
 
+    private static string NormalizeCategory(string s) =>
+        s.Normalize(System.Text.NormalizationForm.FormKC).Trim().ToLowerInvariant();
+
     private sealed record RawTerm(
-        string? TermEn,
-        string? TermKo,
-        string? Category,
-        string? DefinitionKo);
+        [property: System.Text.Json.Serialization.JsonPropertyName("term_en")]       string? TermEn,
+        [property: System.Text.Json.Serialization.JsonPropertyName("term_ko")]       string? TermKo,
+        [property: System.Text.Json.Serialization.JsonPropertyName("category")]      string? Category,
+        [property: System.Text.Json.Serialization.JsonPropertyName("definition_ko")] string? DefinitionKo);
 }

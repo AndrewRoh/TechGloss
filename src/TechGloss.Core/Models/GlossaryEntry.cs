@@ -21,6 +21,8 @@ public sealed class GlossaryEntry
 public sealed class GlossaryCategory
 {
     public Guid Id { get; set; }
-    /// <summary>영문 카테고리명 — UNIQUE 제약. 예: "General", "Cloud", "DevOps"</summary>
+    /// <summary>표시용 카테고리명. 예: "General", "Cloud", "DevOps"</summary>
     public string Name { get; set; } = "";
+    /// <summary>NFKC + Trim + ToLower 정규화값 — UNIQUE 제약. 중복 판별 기준.</summary>
+    public string NameEnNormalized { get; set; } = "";
 }

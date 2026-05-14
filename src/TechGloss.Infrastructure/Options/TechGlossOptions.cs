@@ -19,4 +19,6 @@ public sealed class OllamaOptions
 public sealed class GlossaryApiOptions
 {
     public string BaseUrl { get; set; } = "http://127.0.0.1:5088";
+    /// <summary>ExtractTerms 등 Ollama 내부 호출을 포함하는 요청을 커버할 수 있도록 Ollama 타임아웃보다 크게 설정</summary>
+    public int TimeoutSeconds { get; set; } = 180;
 }

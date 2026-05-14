@@ -5,7 +5,10 @@
       "Bash(mv C:/Users/WN-ND000202/works/TechGloss/src/TechGloss.GlossaryApi/TechTrans.GlossaryApi.http C:/Users/WN-ND000202/works/TechGloss/src/TechGloss.GlossaryApi/TechGloss.GlossaryApi.http)",
       "Bash(mv C:/Users/WN-ND000202/works/TechGloss/.idea/.idea.TechTrans C:/Users/WN-ND000202/works/TechGloss/.idea/.idea.TechGloss)",
       "Bash(xargs grep -l \"EnsureCreated\\\\|Migrate\\\\|Seed\")",
-      "Bash(dir \"C:\\\\Users\\\\WN-ND000202\\\\works\\\\TechGloss\\\\src\\\\TechGloss.GlossaryApi\" /AD)"
+      "Bash(dir \"C:\\\\Users\\\\WN-ND000202\\\\works\\\\TechGloss\\\\src\\\\TechGloss.GlossaryApi\" /AD)",
+      "Bash(docker exec *)",
+      "PowerShell(docker exec postgres-1 psql -U postgres -d techgloss -c \"\\\\dt\" 2>&1)",
+      "PowerShell(cd C:\\\\Users\\\\WN-ND000202\\\\works\\\\TechGloss; $proc = Start-Process -FilePath \"dotnet\" -ArgumentList \"run --project src\\\\TechGloss.GlossaryApi\" -PassThru -RedirectStandardOutput \"C:\\\\Temp\\\\glossary_out2.txt\" -RedirectStandardError \"C:\\\\Temp\\\\glossary_err2.txt\" -NoNewWindow; Start-Sleep -Seconds 10; if \\(-not $proc.HasExited\\) { $proc.Kill\\(\\) }; Get-Content \"C:\\\\Temp\\\\glossary_out2.txt\",\"C:\\\\Temp\\\\glossary_err2.txt\" -ErrorAction SilentlyContinue)"
     ]
   }
 }
